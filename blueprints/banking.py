@@ -198,7 +198,9 @@ def session():
             log.info("[session] Balances response: status=%s", bal_resp.status_code)
 
             log.info("[session] Fetching transactions for %s...", uid)
-            date_from = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 90 * 86400))
+            # Try to fetch up to 2 years of history. Banks may limit this (e.g. 90 days),
+            # but we request the maximum possible.
+            date_from = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 730 * 86400))
             tx_resp = requests.get(
                 f"{API_BASE}/accounts/{uid}/transactions?date_from={date_from}",
                 headers=headers,

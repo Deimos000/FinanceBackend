@@ -80,5 +80,8 @@ ENABLE_BANKING_REDIRECT_URL = os.environ.get(
     "ENABLE_BANKING_REDIRECT_URL", "https://localhost/"
 )
 
+# ── Gemini / AI ───────────────────────────────────────────
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
 # ── Flask ─────────────────────────────────────────────────
 PORT = int(os.environ.get("PORT", 5000))

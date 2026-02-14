@@ -101,6 +101,10 @@ def get_transactions():
         clauses.append("booking_date >= %s")
         params.append(cutoff)
 
+    # Filter for uncategorized
+    if request.args.get("uncategorized") == "true":
+        clauses.append("(category IS NULL OR category = '')")
+
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = query(
         f"SELECT * FROM transactions {where} ORDER BY booking_date DESC",
@@ -162,3 +166,18 @@ def monthly_income():
         r["amount"] = float(r["amount"])
 
     return jsonify(rows)
+
+@transactions_bp.route("/api/transactions/<transaction_id>", methods=["PATCH"])
+def update_transaction(transaction_id):
+    """Update a transaction's category (or other fields in future)."""
+    data = request.get_json()
+    category = data.get("category")
+
+    if category is not None:
+        query(
+            "UPDATE transactions SET category = %s WHERE transaction_id = %s",
+            (category, transaction_id)
+        )
+        return jsonify({"status": "updated", "category": category})
+
+    return jsonify({"error": "No valid fields to update"}), 400
