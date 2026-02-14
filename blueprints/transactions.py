@@ -122,21 +122,31 @@ def get_transactions():
 
 @transactions_bp.route("/api/transactions/daily-spending", methods=["GET"])
 def daily_spending():
-    """Sum of absolute spending per day (negative amounts) for the last N days."""
-    days = request.args.get("days", 30, type=int)
-    cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    """Sum of absolute spending per day (negative amounts) for the last N days OR specific range."""
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+    days = request.args.get("days", type=int)
 
-    rows = query(
-        """
+    if not start_date:
+        # Fallback to days if no start_date
+        d = days if days else 30
+        start_date = (datetime.utcnow() - timedelta(days=d)).strftime("%Y-%m-%d")
+    
+    # Construct query
+    sql = """
         SELECT booking_date::text AS date, SUM(ABS(amount)) AS amount
         FROM transactions
         WHERE amount < 0 AND booking_date >= %s
-        GROUP BY booking_date
-        ORDER BY booking_date
-        """,
-        (cutoff,),
-        fetchall=True,
-    )
+    """
+    params = [start_date]
+
+    if end_date:
+        sql += " AND booking_date <= %s"
+        params.append(end_date)
+    
+    sql += " GROUP BY booking_date ORDER BY booking_date"
+
+    rows = query(sql, tuple(params), fetchall=True)
 
     for r in rows:
         r["amount"] = float(r["amount"])

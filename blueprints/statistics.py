@@ -8,9 +8,10 @@ statistics_bp = Blueprint('statistics', __name__)
 @statistics_bp.route('/api/stats/category-spending', methods=['GET'])
 def category_spending():
     """
-    Returns total spending grouped by category for the last N months.
+    Returns total spending grouped by category for a specific date range.
     """
-    months = request.args.get('months', 6, type=int)
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
     
     # We only care about expenses (negative amounts)
     # Group by category
@@ -18,14 +19,15 @@ def category_spending():
         SELECT category, SUM(ABS(amount)) as total
         FROM transactions
         WHERE amount < 0
-          AND booking_date >= CURRENT_DATE - INTERVAL '%s months'
+          AND booking_date >= %s
+          AND booking_date <= %s
           AND category IS NOT NULL
           AND category != ''
         GROUP BY category
         ORDER BY total DESC
     """
     
-    rows = query(sql, (months,), fetchall=True)
+    rows = query(sql, (start_date, end_date), fetchall=True)
     
     # Get category colors/icons to enrich response
     categories_ref = query("SELECT name, color, icon FROM categories", fetchall=True)
@@ -47,19 +49,21 @@ def category_spending():
 @statistics_bp.route('/api/stats/categorize', methods=['POST'])
 def trigger_categorization():
     """
-    Finds uncategorized transactions and uses Gemini to categorize them.
+    Finds uncategorized transactions AND transactions categorized as 'Other'
+    and uses Gemini to categorize them.
     """
-    # 1. Find uncategorized transactions (limit to prevent huge batches)
+    # 1. Find target transactions (limit to prevent huge batches)
+    # Target: NULL, empty string, or 'Other'
     uncategorized = query("""
         SELECT transaction_id, remittance_information, creditor_name, amount
         FROM transactions
-        WHERE (category IS NULL OR category = '')
+        WHERE (category IS NULL OR category = '' OR category = 'Other')
         ORDER BY booking_date DESC
         LIMIT 50
     """, fetchall=True)
     
     if not uncategorized:
-        return jsonify({"message": "No uncategorized transactions found", "count": 0})
+        return jsonify({"message": "No transactions to categorize found", "count": 0})
         
     # 2. Call Gemini
     # Convert rows (dicts) to list for the service
@@ -72,14 +76,10 @@ def trigger_categorization():
     # 3. Update Database
     updated_count = 0
     for tx_id, category in category_map.items():
-        # Validate category exists? Or just insert?
-        # Let's ensure the category exists in our allowable list or DB. 
-        # For now, we trust Gemini to return from the allowed list, 
-        # but we should probably upsert the category if it doesn't exist to be safe,
-        # OR just strictly filter.
-        # The prompt asks for specific categories.
+        # gemini.py says it returns "Other" sometimes.
+        # If Gemini returns "Other", we might as well keep it (or original was Other).
+        # But if it finds a better match, we update.
         
-        # We'll just update the transaction.
         query("""
             UPDATE transactions
             SET category = %s

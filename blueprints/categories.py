@@ -15,3 +15,20 @@ def get_categories():
     for r in rows:
         r["total"] = 0
     return jsonify(rows)
+
+from flask import request
+@categories_bp.route("/api/categories", methods=["POST"])
+def create_category():
+    data = request.get_json()
+    name = data.get("name")
+    color = data.get("color")
+    icon = data.get("icon")
+
+    if not name or not color or not icon:
+        return jsonify({"error": "Missing fields"}), 400
+
+    query(
+        "INSERT INTO categories (name, color, icon) VALUES (%s, %s, %s) ON CONFLICT (name) DO NOTHING",
+        (name, color, icon)
+    )
+    return jsonify({"status": "created", "name": name})
