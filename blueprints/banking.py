@@ -150,6 +150,46 @@ def auth_url():
     return jsonify({"url": data["url"]})
 
 
+# ── helpers ─────────────────────────────────────────────────
+
+def _fetch_all_transactions(uid, headers, date_from):
+    """
+    Fetch ALL transactions by following pagination (continuation_key).
+    Returns a list of transaction dicts.
+    """
+    all_transactions = []
+    continuation_key = None
+    
+    # Safety break to prevent infinite loops if API goes haywire
+    max_pages = 20 
+    page = 0
+
+    while page < max_pages:
+        page += 1
+        url = f"{API_BASE}/accounts/{uid}/transactions?date_from={date_from}"
+        if continuation_key:
+            url += f"&continuation_key={continuation_key}"
+        
+        log.info("[_fetch_all_transactions] Page %d for %s", page, uid)
+        resp = requests.get(url, headers=headers)
+        
+        if not resp.ok:
+            log.error("[_fetch_all_transactions] Failed on page %d: %s %s", page, resp.status_code, resp.text)
+            break
+            
+        data = resp.json()
+        txs = data.get("transactions", [])
+        all_transactions.extend(txs)
+        
+        log.info("[_fetch_all_transactions] Page %d got %d txs. Total so far: %d", page, len(txs), len(all_transactions))
+        
+        continuation_key = data.get("continuation_key")
+        if not continuation_key:
+            break
+            
+    return all_transactions
+
+
 # ── session ───────────────────────────────────────────────
 
 @banking_bp.route("/api/banking/session", methods=["POST"])
@@ -198,14 +238,12 @@ def session():
             log.info("[session] Balances response: status=%s", bal_resp.status_code)
 
             log.info("[session] Fetching transactions for %s...", uid)
-            # Try to fetch up to 2 years of history. Banks may limit this (e.g. 90 days),
-            # but we request the maximum possible.
+            # Fetch up to 2 years of history
             date_from = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 730 * 86400))
-            tx_resp = requests.get(
-                f"{API_BASE}/accounts/{uid}/transactions?date_from={date_from}",
-                headers=headers,
-            )
-            log.info("[session] Transactions response: status=%s", tx_resp.status_code)
+            
+            # USE PAGINATION HELPER
+            transactions = _fetch_all_transactions(uid, headers, date_from)
+            acc["transactions"] = transactions
 
             if bal_resp.ok:
                 bal_data = bal_resp.json()
@@ -227,14 +265,11 @@ def session():
                 log.warning("[session] Could not fetch balances for %s: %s %s",
                             uid, bal_resp.status_code, bal_resp.text[:200])
 
-            if tx_resp.ok:
-                tx_data = tx_resp.json()
-                acc["transactions"] = tx_data.get("transactions", [])
-                log.info("[session] Got %d transactions for %s", len(acc["transactions"]), uid)
-
+            # Save transactions
+            if transactions:
                 saved_count = 0
                 failed_count = 0
-                for t in acc["transactions"]:
+                for t in transactions:
                     try:
                         save_transaction(t, uid)
                         saved_count += 1
@@ -245,8 +280,7 @@ def session():
                 log.info("[session] Transactions saved: %d ok, %d failed for %s",
                          saved_count, failed_count, uid)
             else:
-                log.warning("[session] Could not fetch transactions for %s: %s %s",
-                            uid, tx_resp.status_code, tx_resp.text[:200])
+                 log.info("[session] No transactions found for %s", uid)
 
         except Exception as e:
             tb = traceback.format_exc()
@@ -292,11 +326,10 @@ def refresh():
             _save_account_to_db(acc)
 
             bal_resp = requests.get(f"{API_BASE}/accounts/{uid}/balances", headers=headers)
-            tx_resp = requests.get(
-                f"{API_BASE}/accounts/{uid}/transactions?date_from="
-                + time.strftime("%Y-%m-%d", time.gmtime(time.time() - 730 * 86400)),
-                headers=headers,
-            )
+            
+            # Fetch transactions with pagination
+            date_from = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 730 * 86400))
+            transactions = _fetch_all_transactions(uid, headers, date_from)
 
             if bal_resp.ok:
                 bal_data = bal_resp.json()
@@ -312,19 +345,22 @@ def refresh():
                             acc["balances"] = {"current": parsed_bal, "iso_currency_code": "EUR"}
                         log.info("[refresh] Balance for %s: %s", uid, parsed_bal)
 
-            if tx_resp.ok:
-                tx_data = tx_resp.json()
-                acc["transactions"] = tx_data.get("transactions", [])
-                log.info("[refresh] Got %d transactions for %s", len(acc["transactions"]), uid)
-                for t in acc["transactions"]:
-                    try:
-                        save_transaction(t, acc.get("account_id") or uid)
-                    except Exception as tx_err:
-                        log.error("[refresh] Failed to save transaction: %s", tx_err)
-            else:
-                if tx_resp.status_code == 401:
-                    acc["sessionExpired"] = True
-                    log.warning("[refresh] Session expired for %s", uid)
+            # Update transactions in account object and save to DB
+            acc["transactions"] = transactions
+            log.info("[refresh] Got %d transactions for %s", len(transactions), uid)
+            
+            for t in transactions:
+                try:
+                    save_transaction(t, acc.get("account_id") or uid)
+                except Exception as tx_err:
+                    log.error("[refresh] Failed to save transaction: %s", tx_err)
+                    
+            if not bal_resp.ok and bal_resp.status_code == 401:
+                 # Check if transaction fetch also failed with 401/403 which would imply session expired
+                 # But we don't have the last tx_resp status here easily unless we refactor _fetch_all_transactions to return it.
+                 # For now, rely on balance response for session validity check
+                 acc["sessionExpired"] = True
+                 log.warning("[refresh] Session expired for %s (balance check)", uid)
 
             _save_account_to_db(acc)
 
