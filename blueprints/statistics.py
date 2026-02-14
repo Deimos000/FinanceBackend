@@ -46,6 +46,47 @@ def category_spending():
         
     return jsonify(results)
 
+@statistics_bp.route('/api/stats/category-trends', methods=['GET'])
+def category_trends():
+    """
+    Returns daily spending, grouped by category.
+    """
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+
+    # Get daily spending per category
+    sql = """
+        SELECT category, booking_date, SUM(ABS(amount)) as total
+        FROM transactions
+        WHERE amount < 0
+          AND booking_date >= %s
+          AND booking_date <= %s
+          AND category IS NOT NULL
+          AND category != ''
+        GROUP BY category, booking_date
+        ORDER BY booking_date ASC
+    """
+    
+    rows = query(sql, (start_date, end_date), fetchall=True)
+    
+    # Structure: { "Category Name": [ { date: "YYYY-MM-DD", amount: 123.45 }, ... ] }
+    results = {}
+    
+    # Get all categories to ensure we have colors if needed (or frontend handles it)
+    # For now, just grouping data.
+    
+    for r in rows:
+        cat = r['category']
+        if cat not in results:
+            results[cat] = []
+        
+        results[cat].append({
+            'date': r['booking_date'].strftime('%Y-%m-%d'),
+            'amount': float(r['total'])
+        })
+        
+    return jsonify(results)
+
 @statistics_bp.route('/api/stats/categorize', methods=['POST'])
 def trigger_categorization():
     """

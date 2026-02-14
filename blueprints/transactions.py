@@ -89,6 +89,8 @@ def get_transactions():
     """List transactions with optional filters: account_id, days."""
     account_id = request.args.get("account_id")
     days = request.args.get("days", type=int)
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
 
     clauses = []
     params = []
@@ -96,7 +98,14 @@ def get_transactions():
     if account_id:
         clauses.append("account_id = %s")
         params.append(account_id)
-    if days:
+    
+    if start_date:
+        clauses.append("booking_date >= %s")
+        params.append(start_date)
+        if end_date:
+            clauses.append("booking_date <= %s")
+            params.append(end_date)
+    elif days:
         cutoff = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
         clauses.append("booking_date >= %s")
         params.append(cutoff)
