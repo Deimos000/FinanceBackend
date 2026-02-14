@@ -30,7 +30,7 @@ def categorize_transactions(transactions):
     if not transactions or not GEMINI_API_KEY:
         return []
 
-    model = genai.GenerativeModel('gemini-2.0-flash')
+    model = genai.GenerativeModel('gemini-2.5-flash')
 
     # Prepare specific minimal data for the prompt to save tokens (and privacy)
     # We essentially want just the description/remittance info.
