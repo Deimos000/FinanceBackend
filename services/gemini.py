@@ -62,5 +62,7 @@ def categorize_transactions(transactions):
         category_map = json.loads(text_response)
         return category_map
     except Exception as e:
-        print(f"Gemini Error: {e}")
+        print(f"Gemini Error during generation: {e}")
+        import traceback
+        traceback.print_exc()
         return {}
