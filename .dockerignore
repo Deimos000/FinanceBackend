@@ -1,0 +1,8 @@
+
+.venv
+Finance2
+__pycache__
+*.pyc
+.git
+.gitignore
+.dockerignore
