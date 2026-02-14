@@ -294,7 +294,7 @@ def refresh():
             bal_resp = requests.get(f"{API_BASE}/accounts/{uid}/balances", headers=headers)
             tx_resp = requests.get(
                 f"{API_BASE}/accounts/{uid}/transactions?date_from="
-                + time.strftime("%Y-%m-%d", time.gmtime(time.time() - 90 * 86400)),
+                + time.strftime("%Y-%m-%d", time.gmtime(time.time() - 730 * 86400)),
                 headers=headers,
             )
 
