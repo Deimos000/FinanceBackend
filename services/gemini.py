@@ -1,10 +1,19 @@
 import os
-import google.generativeai as genai
 import json
 from config import GEMINI_API_KEY
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+try:
+    import google.generativeai as genai
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
+    print("Warning: google-generativeai module not found. AI features disabled.")
+
+if HAS_GEMINI and GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        print(f"Failed to configure Gemini: {e}")
 
 def categorize_transactions(transactions):
     """
@@ -15,6 +24,9 @@ def categorize_transactions(transactions):
     Allowed Categories:
     Groceries, Shopping, Transport, Income, Utilities, Entertainment, Health, Dining, Other
     """
+    if not HAS_GEMINI:
+        return {}
+
     if not transactions or not GEMINI_API_KEY:
         return []
 
