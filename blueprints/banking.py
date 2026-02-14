@@ -7,7 +7,7 @@ Endpoints:
   POST /api/banking/refresh    – refresh account balances & transactions
 """
 
-import json, time, requests
+import json, time, logging, traceback, requests
 import jwt as pyjwt
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from flask import Blueprint, request, jsonify
@@ -21,6 +21,7 @@ from blueprints.transactions import save_transaction
 from database import query
 
 banking_bp = Blueprint("banking", __name__)
+log = logging.getLogger(__name__)
 
 API_BASE = "https://api.enablebanking.com"
 
@@ -57,6 +58,7 @@ def _save_account_to_db(acc):
     """Persist an account dict into the accounts table (upsert)."""
     account_id = acc.get("uid") or acc.get("account_id") or acc.get("iban")
     if not account_id or not isinstance(account_id, str):
+        log.warning("[_save_account_to_db] Skipping – no valid account_id found in %s", list(acc.keys()))
         return
 
     # Parse balance
@@ -76,6 +78,9 @@ def _save_account_to_db(acc):
         bank_name = "N26"
     elif "72160400" in iban:
         bank_name = "Commerzbank"
+
+    log.info("[_save_account_to_db] Saving account_id=%s, iban=%s, balance=%s, bank=%s",
+             account_id, iban, balance, bank_name)
 
     query(
         """
@@ -102,6 +107,7 @@ def _save_account_to_db(acc):
             bank_name,
         ),
     )
+    log.info("[_save_account_to_db] ✅ Account %s saved successfully", account_id)
 
 
 # ── auth-url ──────────────────────────────────────────────
@@ -110,6 +116,8 @@ def _save_account_to_db(acc):
 def auth_url():
     body = request.get_json(force=True) or {}
     bank_name = body.get("bankName", "Commerzbank")
+
+    log.info("[auth-url] Requesting auth URL for bank=%s", bank_name)
 
     headers = _api_headers()
     valid_until = time.strftime(
@@ -127,13 +135,18 @@ def auth_url():
         },
     )
 
+    log.info("[auth-url] Enable Banking responded: status=%s", resp.status_code)
+
     if not resp.ok:
+        log.error("[auth-url] Enable Banking error: %s %s", resp.status_code, resp.text)
         return jsonify({"error": f"Enable Banking API returned {resp.status_code}", "details": resp.text}), resp.status_code
 
     data = resp.json()
     if not data.get("url"):
+        log.error("[auth-url] No login URL in response: %s", data)
         return jsonify({"error": "No login URL returned", "details": data}), 500
 
+    log.info("[auth-url] ✅ Auth URL obtained, redirecting user")
     return jsonify({"url": data["url"]})
 
 
@@ -146,53 +159,106 @@ def session():
     if not code:
         return jsonify({"error": "Missing code"}), 400
 
+    log.info("[session] ▶ Starting session exchange. Code prefix: %s...", code[:20] if len(code) > 20 else code)
+
     headers = _api_headers()
 
+    # Step 1: Exchange auth code for session with Enable Banking
     resp = requests.post(f"{API_BASE}/sessions", headers=headers, json={"code": code})
+    log.info("[session] Enable Banking /sessions responded: status=%s", resp.status_code)
+
     if not resp.ok:
+        log.error("[session] Enable Banking /sessions FAILED: status=%s body=%s", resp.status_code, resp.text)
         return jsonify({"error": resp.text}), resp.status_code
 
     session_data = resp.json()
     accounts = session_data.get("accounts", [])
+    log.info("[session] Enable Banking returned %d account(s). Session keys: %s",
+             len(accounts), list(session_data.keys()))
 
-    for acc in accounts:
+    errors = []
+
+    for i, acc in enumerate(accounts):
         uid = acc.get("uid") or acc.get("account_id") or acc.get("iban")
         if not uid or not isinstance(uid, str):
+            log.warning("[session] Skipping account #%d – no valid uid. Keys: %s", i, list(acc.keys()))
             continue
 
+        log.info("[session] Processing account #%d: uid=%s, iban=%s", i, uid, acc.get("iban", "N/A"))
+
         try:
-            bal_resp, tx_resp = (
-                requests.get(f"{API_BASE}/accounts/{uid}/balances", headers=headers),
-                requests.get(
-                    f"{API_BASE}/accounts/{uid}/transactions?date_from="
-                    + time.strftime("%Y-%m-%d", time.gmtime(time.time() - 90 * 86400)),
-                    headers=headers,
-                ),
+            # ── STEP 2: Save account FIRST (before transactions!) ──
+            # The transactions table has a FK to accounts(account_id),
+            # so the account row MUST exist before inserting transactions.
+            _save_account_to_db(acc)
+
+            # ── STEP 3: Fetch balances & transactions from Enable Banking ──
+            log.info("[session] Fetching balances for %s...", uid)
+            bal_resp = requests.get(f"{API_BASE}/accounts/{uid}/balances", headers=headers)
+            log.info("[session] Balances response: status=%s", bal_resp.status_code)
+
+            log.info("[session] Fetching transactions for %s...", uid)
+            date_from = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 90 * 86400))
+            tx_resp = requests.get(
+                f"{API_BASE}/accounts/{uid}/transactions?date_from={date_from}",
+                headers=headers,
             )
+            log.info("[session] Transactions response: status=%s", tx_resp.status_code)
 
             if bal_resp.ok:
                 bal_data = bal_resp.json()
                 acc["balances"] = bal_data.get("balances", [])
+                log.info("[session] Got %d balance entries for %s", len(acc["balances"]), uid)
 
-                # Parse into current balance for our DB
+                # Parse balance and update account in DB with real balance
                 if acc["balances"] and isinstance(acc["balances"], list):
                     first = acc["balances"][0]
                     amt_obj = first.get("amount") or first.get("balanceAmount") or first.get("balance_amount") or {}
                     if isinstance(amt_obj, dict) and amt_obj.get("amount"):
-                        acc.setdefault("_parsed", {})["current"] = float(amt_obj["amount"])
+                        parsed_bal = float(amt_obj["amount"])
+                        acc.setdefault("_parsed", {})["current"] = parsed_bal
+                        log.info("[session] Parsed balance for %s: %s", uid, parsed_bal)
+
+                # Re-save account with updated balance
+                _save_account_to_db(acc)
+            else:
+                log.warning("[session] Could not fetch balances for %s: %s %s",
+                            uid, bal_resp.status_code, bal_resp.text[:200])
 
             if tx_resp.ok:
                 tx_data = tx_resp.json()
                 acc["transactions"] = tx_data.get("transactions", [])
-                for t in acc["transactions"]:
-                    save_transaction(t, uid)
+                log.info("[session] Got %d transactions for %s", len(acc["transactions"]), uid)
 
-            _save_account_to_db(acc)
+                saved_count = 0
+                failed_count = 0
+                for t in acc["transactions"]:
+                    try:
+                        save_transaction(t, uid)
+                        saved_count += 1
+                    except Exception as tx_err:
+                        failed_count += 1
+                        log.error("[session] Failed to save transaction for %s: %s", uid, tx_err)
+
+                log.info("[session] Transactions saved: %d ok, %d failed for %s",
+                         saved_count, failed_count, uid)
+            else:
+                log.warning("[session] Could not fetch transactions for %s: %s %s",
+                            uid, tx_resp.status_code, tx_resp.text[:200])
 
         except Exception as e:
-            print(f"[banking/session] Error for {uid}: {e}")
+            tb = traceback.format_exc()
+            log.error("[session] ❌ Error processing account %s: %s\n%s", uid, e, tb)
+            errors.append({"account": uid, "error": str(e)})
 
-    return jsonify({"accounts": accounts})
+    result = {"accounts": accounts}
+    if errors:
+        result["errors"] = errors
+        log.warning("[session] Completed with %d error(s)", len(errors))
+    else:
+        log.info("[session] ✅ Session completed successfully for %d accounts", len(accounts))
+
+    return jsonify(result)
 
 
 # ── refresh ───────────────────────────────────────────────
@@ -205,16 +271,24 @@ def refresh():
     if not isinstance(accounts, list):
         return jsonify({"error": "Missing accounts list"}), 400
 
+    log.info("[refresh] ▶ Refreshing %d account(s)", len(accounts))
+
     headers = _api_headers()
 
     updated = []
     for acc in accounts:
         uid = acc.get("raw", {}).get("uid") or acc.get("account_id") or acc.get("uid")
         if not uid or not isinstance(uid, str):
+            log.warning("[refresh] Skipping account – no valid uid. Keys: %s", list(acc.keys()))
             updated.append(acc)
             continue
 
+        log.info("[refresh] Processing uid=%s", uid)
+
         try:
+            # Save/update account row first
+            _save_account_to_db(acc)
+
             bal_resp = requests.get(f"{API_BASE}/accounts/{uid}/balances", headers=headers)
             tx_resp = requests.get(
                 f"{API_BASE}/accounts/{uid}/transactions?date_from="
@@ -234,21 +308,29 @@ def refresh():
                             acc["balances"]["current"] = parsed_bal
                         else:
                             acc["balances"] = {"current": parsed_bal, "iso_currency_code": "EUR"}
+                        log.info("[refresh] Balance for %s: %s", uid, parsed_bal)
 
             if tx_resp.ok:
                 tx_data = tx_resp.json()
                 acc["transactions"] = tx_data.get("transactions", [])
+                log.info("[refresh] Got %d transactions for %s", len(acc["transactions"]), uid)
                 for t in acc["transactions"]:
-                    save_transaction(t, acc.get("account_id") or uid)
+                    try:
+                        save_transaction(t, acc.get("account_id") or uid)
+                    except Exception as tx_err:
+                        log.error("[refresh] Failed to save transaction: %s", tx_err)
             else:
                 if tx_resp.status_code == 401:
                     acc["sessionExpired"] = True
+                    log.warning("[refresh] Session expired for %s", uid)
 
             _save_account_to_db(acc)
 
         except Exception as e:
-            print(f"[banking/refresh] Error for {uid}: {e}")
+            tb = traceback.format_exc()
+            log.error("[refresh] ❌ Error for %s: %s\n%s", uid, e, tb)
 
         updated.append(acc)
 
+    log.info("[refresh] ✅ Refresh completed for %d account(s)", len(updated))
     return jsonify({"accounts": updated})

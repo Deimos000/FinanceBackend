@@ -2,6 +2,9 @@
 Finance Backend – Flask entry point.
 """
 
+import logging
+import sys
+
 from flask import Flask
 from flask_cors import CORS
 
@@ -16,7 +19,19 @@ from blueprints.stocks import stocks_bp
 
 
 def create_app():
+    # ── Configure logging for Cloud Run ──
+    # Cloud Run captures stdout/stderr → send structured logs there
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+
     app = Flask(__name__)
+
+    # Also set Flask's own logger to INFO
+    app.logger.setLevel(logging.INFO)
 
     # Allow requests from any origin (Expo dev server, web, mobile, etc.)
     CORS(app)
@@ -34,6 +49,8 @@ def create_app():
     @app.route("/health")
     def health():
         return {"status": "ok"}
+
+    app.logger.info("Finance Backend started. Blueprints registered.")
 
     return app
 
