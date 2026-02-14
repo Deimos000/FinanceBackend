@@ -79,7 +79,8 @@ def yahoo_proxy():
         # --- Construct API Response matching Yahoo's 'chart' structure ---
         
         # 1. Timestamps (convert from DatetimeIndex to unix timestamp seconds)
-        timestamps = (hist.index.astype('int64') // 10**9).tolist()
+        # Use simple list comprehension to be safe against numpy dtype variations
+        timestamps = [int(x.timestamp()) for x in hist.index]
 
         # 2. Indicators (Open, High, Low, Close, Volume)
         quote_indicators = {
