@@ -192,7 +192,7 @@ def yahoo_proxy():
 
         print(f"[STOCKS] Constructed Meta for {symbol}: {meta}")
 
-        # Construct final structure
+        # Construction final structure
         result_obj = {
             "meta": _convert_numpy_types(meta),
             "timestamp": timestamps,
@@ -200,6 +200,35 @@ def yahoo_proxy():
                 "quote": [quote_indicators]
             }
         }
+
+        # --- EXTRAS: Historical Comparison Data ---
+        comparison = {"years": [], "metrics": {}}
+        try:
+            # Note: Ticker.financials and Ticker.balance_sheet can be slow
+            financials = ticker.financials
+            balance_sheet = ticker.balance_sheet
+            
+            if not financials.empty:
+                # Get the last 2 fiscal years (columns are dates)
+                cols = financials.columns[:2]
+                comparison["years"] = [str(c.year) for c in cols]
+                
+                def get_metric(df, name):
+                    if name in df.index:
+                        return [_convert_numpy_types(v) for v in df.loc[name, cols].values]
+                    return [None, None]
+
+                comparison["metrics"]["totalRevenue"] = get_metric(financials, "Total Revenue")
+                comparison["metrics"]["ebitda"] = get_metric(financials, "EBITDA")
+                comparison["metrics"]["netIncome"] = get_metric(financials, "Net Income")
+                
+                if not balance_sheet.empty:
+                    comparison["metrics"]["totalCash"] = get_metric(balance_sheet, "Cash And Cash Equivalents") or get_metric(balance_sheet, "Cash Financial")
+                    comparison["metrics"]["totalDebt"] = get_metric(balance_sheet, "Total Debt")
+
+            result_obj["comparison"] = comparison
+        except Exception as fe:
+            print(f"[STOCKS] Failed to fetch financials for {symbol}: {fe}")
 
         response_data = {
             "chart": {
