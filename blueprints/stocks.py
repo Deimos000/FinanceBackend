@@ -184,6 +184,8 @@ def yahoo_proxy():
         meta["returnOnEquity"] = info.get("returnOnEquity")
         meta["revenueGrowth"] = info.get("revenueGrowth")
         meta["earningsGrowth"] = info.get("earningsGrowth")
+        meta["forwardEps"] = info.get("forwardEps")
+        meta["payoutRatio"] = info.get("payoutRatio")
         
         # Financial Health
         meta["totalCash"] = info.get("totalCash")
