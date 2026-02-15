@@ -56,13 +56,18 @@ def yahoo_proxy():
 
     interval = request.args.get("interval", "1d")
     rng = request.args.get("range", "1y")
+    start_date = request.args.get("start")
+    end_date = request.args.get("end")
 
     try:
-        print(f"[STOCKS] Fetching data for {symbol}, range={rng}, interval={interval}")
+        print(f"[STOCKS] Fetching data for {symbol}, range={rng}, interval={interval}, start={start_date}, end={end_date}")
         ticker = yf.Ticker(symbol)
         
         # Fetch history
-        hist = ticker.history(period=rng, interval=interval)
+        if start_date and end_date:
+            hist = ticker.history(start=start_date, end=end_date, interval=interval)
+        else:
+            hist = ticker.history(period=rng, interval=interval)
         
         if hist.empty:
              print(f"[STOCKS] Empty history for {symbol}")
@@ -72,14 +77,32 @@ def yahoo_proxy():
         info = ticker.info
         fast_info = ticker.fast_info
         
-        print(f"[STOCKS] Info for {symbol}: {info}")
-        # fast_info is an object, convert to dict for logging if possible or print repr
-        print(f"[STOCKS] FastInfo for {symbol}: {fast_info}")
-
         # --- Construct API Response matching Yahoo's 'chart' structure ---
         
+        # Snapshot logic: if we have a custom range, overwrite "current" values with the last available bar in that range
+        is_historical = bool(start_date and end_date)
+        snapshot_date = None
+        
+        current_price = info.get("currentPrice") or fast_info.last_price
+        prev_close = info.get("previousClose") or fast_info.previous_close
+        reg_open = info.get("open")
+        reg_high = info.get("dayHigh")
+        reg_low = info.get("dayLow")
+        reg_volume = info.get("volume") or info.get("regularMarketVolume")
+
+        if is_historical and not hist.empty:
+            last_bar = hist.iloc[-1]
+            current_price = _convert_numpy_types(last_bar["Close"])
+            reg_open = _convert_numpy_types(last_bar["Open"])
+            reg_high = _convert_numpy_types(last_bar["High"])
+            reg_low = _convert_numpy_types(last_bar["Low"])
+            reg_volume = _convert_numpy_types(last_bar["Volume"])
+            snapshot_date = str(hist.index[-1].date())
+            
+            if len(hist) > 1:
+                prev_close = _convert_numpy_types(hist.iloc[-2]["Close"])
+
         # 1. Timestamps (convert from DatetimeIndex to unix timestamp seconds)
-        # Use simple list comprehension to be safe against numpy dtype variations
         timestamps = [int(x.timestamp()) for x in hist.index]
 
         # 2. Indicators (Open, High, Low, Close, Volume)
@@ -101,9 +124,9 @@ def yahoo_proxy():
             "regularMarketTime": info.get("regularMarketTime"),
             "timezone": info.get("timeZoneShortName", "UTC"),
             "exchangeTimezoneName": info.get("exchangeTimezoneName", "America/New_York"),
-            "regularMarketPrice": info.get("currentPrice") or fast_info.last_price,
-            "chartPreviousClose": info.get("previousClose") or fast_info.previous_close,
-            "previousClose": info.get("previousClose") or fast_info.previous_close,
+            "regularMarketPrice": current_price,
+            "chartPreviousClose": prev_close,
+            "previousClose": prev_close,
             "scale": 3,
             "priceHint": 2,
             "currentTradingPeriod": {
@@ -113,21 +136,20 @@ def yahoo_proxy():
             },
             "dataGranularity": interval,
             "range": rng,
-            "validRanges": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
+            "validRanges": ["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"],
+            "snapshotDate": snapshot_date
         }
         
         # Extra fields used by frontend logic:
         meta["longName"] = info.get("longName")
         meta["shortName"] = info.get("shortName")
-        meta["regularMarketOpen"] = info.get("open")
-        meta["regularMarketDayHigh"] = info.get("dayHigh")
-        meta["regularMarketDayLow"] = info.get("dayLow")
+        meta["regularMarketOpen"] = reg_open
+        meta["regularMarketDayHigh"] = reg_high
+        meta["regularMarketDayLow"] = reg_low
         meta["fiftyTwoWeekHigh"] = info.get("fiftyTwoWeekHigh")
         meta["fiftyTwoWeekLow"] = info.get("fiftyTwoWeekLow")
-        
-        # Extended fields for detailed view
         meta["marketCap"] = info.get("marketCap")
-        meta["volume"] = info.get("volume") or info.get("regularMarketVolume")
+        meta["volume"] = reg_volume
         meta["trailingPE"] = info.get("trailingPE")
         meta["dividendYield"] = info.get("dividendYield") or info.get("trailingAnnualDividendYield")
         meta["sector"] = info.get("sector")
@@ -204,27 +226,48 @@ def yahoo_proxy():
         # --- EXTRAS: Historical Comparison Data ---
         comparison = {"years": [], "metrics": {}}
         try:
-            # Note: Ticker.financials and Ticker.balance_sheet can be slow
+            # Fetch all three statements
             financials = ticker.financials
             balance_sheet = ticker.balance_sheet
+            cashflow = ticker.cashflow
             
             if not financials.empty:
                 # Get the last 2 fiscal years (columns are dates)
                 cols = financials.columns[:2]
                 comparison["years"] = [str(c.year) for c in cols]
                 
-                def get_metric(df, name):
-                    if name in df.index:
-                        return [_convert_numpy_types(v) for v in df.loc[name, cols].values]
+                def get_metric(df, names):
+                    """Try multiple possible names for a metric."""
+                    if df is None or df.empty: return [None, None]
+                    if isinstance(names, str): names = [names]
+                    for name in names:
+                        if name in df.index:
+                            return [_convert_numpy_types(v) for v in df.loc[name, cols].values]
                     return [None, None]
 
-                comparison["metrics"]["totalRevenue"] = get_metric(financials, "Total Revenue")
+                # Income Statement
+                comparison["metrics"]["totalRevenue"] = get_metric(financials, ["Total Revenue", "Total Operating Revenue"])
+                comparison["metrics"]["grossProfit"] = get_metric(financials, "Gross Profit")
+                comparison["metrics"]["operatingIncome"] = get_metric(financials, "Operating Income")
                 comparison["metrics"]["ebitda"] = get_metric(financials, "EBITDA")
-                comparison["metrics"]["netIncome"] = get_metric(financials, "Net Income")
+                comparison["metrics"]["netIncome"] = get_metric(financials, ["Net Income", "Net Income Common Stockholders"])
+                comparison["metrics"]["dilutedEPS"] = get_metric(financials, "Diluted EPS")
                 
+                # Balance Sheet
                 if not balance_sheet.empty:
-                    comparison["metrics"]["totalCash"] = get_metric(balance_sheet, "Cash And Cash Equivalents") or get_metric(balance_sheet, "Cash Financial")
+                    comparison["metrics"]["totalAssets"] = get_metric(balance_sheet, "Total Assets")
+                    comparison["metrics"]["totalLiabilities"] = get_metric(balance_sheet, ["Total Liabilities Net Minority Interest", "Total Liabilities"])
+                    comparison["metrics"]["equity"] = get_metric(balance_sheet, "Stockholders Equity")
+                    comparison["metrics"]["totalCash"] = get_metric(balance_sheet, ["Cash And Cash Equivalents", "Cash Financial", "Cash Cash Equivalents And Short Term Investments"])
                     comparison["metrics"]["totalDebt"] = get_metric(balance_sheet, "Total Debt")
+                    comparison["metrics"]["inventory"] = get_metric(balance_sheet, "Inventory")
+
+                # Cash Flow
+                if not cashflow.empty:
+                    comparison["metrics"]["operatingCashflow"] = get_metric(cashflow, "Operating Cash Flow")
+                    comparison["metrics"]["investingCashflow"] = get_metric(cashflow, "Investing Cash Flow")
+                    comparison["metrics"]["financingCashflow"] = get_metric(cashflow, "Financing Cash Flow")
+                    comparison["metrics"]["freeCashflow"] = get_metric(cashflow, "Free Cash Flow")
 
             result_obj["comparison"] = comparison
         except Exception as fe:
