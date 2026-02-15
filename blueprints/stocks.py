@@ -251,7 +251,8 @@ def yahoo_proxy():
                 comparison["metrics"]["operatingIncome"] = get_metric(financials, "Operating Income")
                 comparison["metrics"]["ebitda"] = get_metric(financials, "EBITDA")
                 comparison["metrics"]["netIncome"] = get_metric(financials, ["Net Income", "Net Income Common Stockholders"])
-                comparison["metrics"]["dilutedEPS"] = get_metric(financials, "Diluted EPS")
+                comparison["metrics"]["basicEPS"] = get_metric(financials, ["Basic EPS", "Basic Earnings Per Share", "Basic EPS Common Stockholders"])
+                comparison["metrics"]["dilutedEPS"] = get_metric(financials, ["Diluted EPS", "Diluted Earnings Per Share", "Diluted EPS Common Stockholders"])
                 
                 # Balance Sheet
                 if not balance_sheet.empty:
