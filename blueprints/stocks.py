@@ -124,6 +124,71 @@ def yahoo_proxy():
         meta["regularMarketDayLow"] = info.get("dayLow")
         meta["fiftyTwoWeekHigh"] = info.get("fiftyTwoWeekHigh")
         meta["fiftyTwoWeekLow"] = info.get("fiftyTwoWeekLow")
+        
+        # Extended fields for detailed view
+        meta["marketCap"] = info.get("marketCap")
+        meta["volume"] = info.get("volume") or info.get("regularMarketVolume")
+        meta["trailingPE"] = info.get("trailingPE")
+        meta["dividendYield"] = info.get("dividendYield") or info.get("trailingAnnualDividendYield")
+        meta["sector"] = info.get("sector")
+        meta["industry"] = info.get("industry")
+        meta["fullTimeEmployees"] = info.get("fullTimeEmployees")
+        meta["website"] = info.get("website")
+        meta["city"] = info.get("city")
+        meta["country"] = info.get("country")
+        meta["longBusinessSummary"] = info.get("longBusinessSummary")
+        
+        # New Rework Fields:
+        # Analyst Ratings
+        meta["recommendationKey"] = info.get("recommendationKey")
+        meta["recommendationMean"] = info.get("recommendationMean")
+        meta["numberOfAnalystOpinions"] = info.get("numberOfAnalystOpinions")
+        meta["targetHighPrice"] = info.get("targetHighPrice")
+        meta["targetLowPrice"] = info.get("targetLowPrice")
+        meta["targetMeanPrice"] = info.get("targetMeanPrice")
+        meta["targetMedianPrice"] = info.get("targetMedianPrice")
+        
+        # Financial Ratios
+        meta["forwardPE"] = info.get("forwardPE")
+        meta["priceToBook"] = info.get("priceToBook")
+        meta["priceToSalesTrailing12Months"] = info.get("priceToSalesTrailing12Months")
+        meta["enterpriseToEbitda"] = info.get("enterpriseToEbitda")
+        meta["trailingPegRatio"] = info.get("trailingPegRatio")
+        meta["profitMargins"] = info.get("profitMargins")
+        meta["grossMargins"] = info.get("grossMargins")
+        meta["operatingMargins"] = info.get("operatingMargins")
+        meta["ebitdaMargins"] = info.get("ebitdaMargins")
+        meta["returnOnAssets"] = info.get("returnOnAssets")
+        meta["returnOnEquity"] = info.get("returnOnEquity")
+        meta["revenueGrowth"] = info.get("revenueGrowth")
+        meta["earningsGrowth"] = info.get("earningsGrowth")
+        
+        # Financial Health
+        meta["totalCash"] = info.get("totalCash")
+        meta["totalDebt"] = info.get("totalDebt")
+        meta["currentRatio"] = info.get("currentRatio")
+        meta["quickRatio"] = info.get("quickRatio")
+        meta["freeCashflow"] = info.get("freeCashflow")
+        meta["operatingCashflow"] = info.get("operatingCashflow")
+        meta["ebitda"] = info.get("ebitda")
+        
+        # Market Data / Ownership
+        meta["beta"] = info.get("beta")
+        meta["heldPercentInsiders"] = info.get("heldPercentInsiders")
+        meta["heldPercentInstitutions"] = info.get("heldPercentInstitutions")
+        meta["shortRatio"] = info.get("shortRatio")
+        meta["shortPercentOfFloat"] = info.get("shortPercentOfFloat")
+        meta["sharesOutstanding"] = info.get("sharesOutstanding")
+        meta["floatShares"] = info.get("floatShares")
+        
+        # Company Officers
+        meta["companyOfficers"] = info.get("companyOfficers")
+        
+        # Governance
+        meta["overallRisk"] = info.get("overallRisk")
+        meta["auditRisk"] = info.get("auditRisk")
+        meta["boardRisk"] = info.get("boardRisk")
+        meta["compensationRisk"] = info.get("compensationRisk")
 
         print(f"[STOCKS] Constructed Meta for {symbol}: {meta}")
 
