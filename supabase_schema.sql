@@ -98,3 +98,13 @@ CREATE TABLE IF NOT EXISTS cash_transactions (
     booking_date TIMESTAMPTZ DEFAULT NOW(),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- 8. Wishlist table
+CREATE TABLE IF NOT EXISTS wishlist (
+    id SERIAL PRIMARY KEY,
+    symbol TEXT NOT NULL UNIQUE,
+    added_at TIMESTAMPTZ DEFAULT NOW(),
+    initial_price NUMERIC(14,2),
+    note TEXT,
+    snapshot JSONB
+);

@@ -17,6 +17,7 @@ from blueprints.cash import cash_bp
 from blueprints.banking import banking_bp
 from blueprints.stocks import stocks_bp
 from blueprints.statistics import statistics_bp
+from blueprints.wishlist import wishlist_bp
 
 
 def create_app():
@@ -46,6 +47,7 @@ def create_app():
     app.register_blueprint(banking_bp)
     app.register_blueprint(stocks_bp)
     app.register_blueprint(statistics_bp)
+    app.register_blueprint(wishlist_bp)
 
     # Health check
     @app.route("/health")
