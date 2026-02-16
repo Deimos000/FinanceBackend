@@ -108,3 +108,38 @@ CREATE TABLE IF NOT EXISTS wishlist (
     note TEXT,
     snapshot JSONB
 );
+
+-- 9. Sandboxes table
+CREATE TABLE IF NOT EXISTS sandboxes (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    balance NUMERIC(14,2) NOT NULL DEFAULT 10000.00,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    initial_balance NUMERIC(14,2) NOT NULL DEFAULT 10000.00
+);
+
+-- 10. Sandbox Transactions table
+CREATE TABLE IF NOT EXISTS sandbox_transactions (
+    id SERIAL PRIMARY KEY,
+    sandbox_id INTEGER NOT NULL REFERENCES sandboxes(id) ON DELETE CASCADE,
+    symbol TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('BUY', 'SELL')),
+    quantity NUMERIC(14,6) NOT NULL,
+    price NUMERIC(14,2) NOT NULL,
+    executed_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sandbox_trans_sandbox_id ON sandbox_transactions(sandbox_id);
+
+-- 11. Sandbox Portfolio table
+CREATE TABLE IF NOT EXISTS sandbox_portfolio (
+    id SERIAL PRIMARY KEY,
+    sandbox_id INTEGER NOT NULL REFERENCES sandboxes(id) ON DELETE CASCADE,
+    symbol TEXT NOT NULL,
+    quantity NUMERIC(14,6) NOT NULL DEFAULT 0,
+    average_buy_price NUMERIC(14,2) NOT NULL DEFAULT 0,
+    last_updated TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(sandbox_id, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sandbox_portfolio_sandbox_id ON sandbox_portfolio(sandbox_id);
