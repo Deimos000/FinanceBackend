@@ -176,7 +176,7 @@ def get_transactions(sandbox_id):
     """Get all transactions."""
     try:
         rows = query(
-            "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s ORDER BY created_at DESC",
+            "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s ORDER BY executed_at DESC",
             (sandbox_id,),
             fetchall=True
         )
