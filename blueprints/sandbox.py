@@ -43,19 +43,58 @@ def _get_current_prices(symbols):
 
 @sandbox_bp.route("/api/sandboxes", methods=["GET"])
 def get_sandboxes():
-    """Return all sandboxes."""
+    """Return all sandboxes with total equity (cash + holdings)."""
     try:
         sandboxes = query("SELECT * FROM sandboxes ORDER BY created_at DESC", fetchall=True)
         results = []
+        
         if sandboxes:
+            # 1. Fetch all portfolio items for all sandboxes to minimize queries
+            # Ideally we'd do a JOIN, but for simplicity we can fetch all and map in python
+            # or fetching per sandbox (N+1) might be slow if many sandboxes.
+            # Let's fetch all portfolio items in one go.
+            all_portfolio_items = query("SELECT * FROM sandbox_portfolio", fetchall=True)
+            
+            # Map items to sandbox_id
+            portfolio_map = {} # sandbox_id -> [items]
+            all_symbols = set()
+            
+            if all_portfolio_items:
+                for item in all_portfolio_items:
+                    sid = item["sandbox_id"]
+                    if sid not in portfolio_map: portfolio_map[sid] = []
+                    portfolio_map[sid].append(item)
+                    all_symbols.add(item["symbol"])
+            
+            # 2. Get current prices for all symbols
+            prices = _get_current_prices(list(all_symbols))
+            
             for s in sandboxes:
+                sid = s.get("id")
+                balance = float(s.get("balance"))
+                initial = float(s.get("initial_balance")) if s.get("initial_balance") else 10000.0
+                
+                # Calculate holdings value
+                holdings_value = 0.0
+                if sid in portfolio_map:
+                    for item in portfolio_map[sid]:
+                        sym = item["symbol"]
+                        qty = float(item["quantity"])
+                        # Use current price or fallback to average buy price if lookup failed
+                        price = prices.get(sym, float(item["average_buy_price"]))
+                        holdings_value += (price * qty)
+                
+                total_equity = balance + holdings_value
+                
                 results.append({
-                    "id": s.get("id"),
+                    "id": sid,
                     "name": s.get("name"),
-                    "balance": float(s.get("balance")),
-                    "initial_balance": float(s.get("initial_balance")) if s.get("initial_balance") else None,
+                    "balance": balance,
+                    "initial_balance": initial,
+                    "total_equity": total_equity, # Add this field!
                     "created_at": str(s.get("created_at")),
                 })
+                
         return jsonify({"sandboxes": results})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
