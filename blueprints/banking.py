@@ -7,7 +7,9 @@ Endpoints:
   POST /api/banking/refresh    – refresh account balances & transactions
 """
 
-import json, time, logging, traceback, requests
+import json, re, time, logging, traceback, requests
+
+_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 import jwt as pyjwt
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from flask import Blueprint, request, jsonify
@@ -56,7 +58,7 @@ def _api_headers():
 
 def _save_account_to_db(acc):
     """Persist an account dict into the accounts table (upsert)."""
-    account_id = acc.get("uid") or acc.get("account_id") or acc.get("iban")
+    account_id = acc.get("uid") or acc.get("account_id") or acc.get("id") or acc.get("iban")
     if not account_id or not isinstance(account_id, str):
         log.warning("[_save_account_to_db] Skipping – no valid account_id found in %s", list(acc.keys()))
         return
@@ -317,18 +319,21 @@ def refresh():
     print(f"DEBUG: [refresh] Received request for {len(accounts)} accounts") 
 
     for acc in accounts:
-        # Fix: check for "id" as well
         uid = acc.get("raw", {}).get("uid") or acc.get("account_id") or acc.get("uid") or acc.get("id")
         if not uid or not isinstance(uid, str):
             msg = f"Skipping account – no valid uid. Keys: {list(acc.keys())}"
             log.warning(f"[refresh] {msg}")
-            print(f"DEBUG: [refresh] {msg}")
             stats["errors"].append(msg)
             updated.append(acc)
             continue
 
+        # Skip local/placeholder accounts that are not real Enable Banking UUIDs
+        if not _UUID_RE.match(uid):
+            log.info("[refresh] Skipping local account uid=%s (not a UUID)", uid)
+            updated.append(acc)
+            continue
+
         log.info("[refresh] Processing uid=%s", uid)
-        print(f"DEBUG: [refresh] Processing uid={uid}")
         stats["processed"] += 1
 
         try:
@@ -336,10 +341,10 @@ def refresh():
             _save_account_to_db(acc)
 
             bal_resp = requests.get(f"{API_BASE}/accounts/{uid}/balances", headers=headers)
-            print(f"DEBUG: [refresh] Balance status: {bal_resp.status_code}")
-            
-            # Fetch transactions with pagination
-            date_from = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 730 * 86400))
+            log.info("[refresh] Balance status: %s", bal_resp.status_code)
+
+            # Fetch transactions – Enable Banking only supports last 90 days
+            date_from = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 89 * 86400))
             transactions = _fetch_all_transactions(uid, headers, date_from)
             print(f"DEBUG: [refresh] Fetched {len(transactions)} transactions from API")
 
