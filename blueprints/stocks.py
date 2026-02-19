@@ -26,6 +26,59 @@ def _convert_numpy_types(obj):
 def yahoo_proxy():
     qtype = request.args.get("type", "quote")
     
+    if qtype == "market_movers":
+        # Curated list of high-cap stocks to simulate a screener
+        tickers = [
+            "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA",
+            "AMD", "AVGO", "ORCL", "CRM", "ADBE", "NFLX", "INTC",
+            "QCOM", "TXN", "IBM", "CSCO", "UBER", "ABNB", "PYPL",
+            "SQ", "COIN", "SHOP", "SPOT", "SNOW", "PLTR", "U", "RBLX",
+            "DKNG", "NET", "CRWD", "DDOG", "ZS", "TEAM", "MDB"
+        ]
+        
+        try:
+            # Efficiently fetch multiple tickers at once
+            data = yf.Tickers(" ".join(tickers))
+            results = []
+            
+            for symbol in tickers:
+                try:
+                    info = data.tickers[symbol].info
+                    # Fallback to fast_info if info is missing or slow
+                    fast_info = data.tickers[symbol].fast_info
+                    
+                    price = info.get("currentPrice") or fast_info.last_price
+                    prev_close = info.get("previousClose") or fast_info.previous_close
+                    
+                    if price and prev_close:
+                        change = price - prev_close
+                        change_percent = (change / prev_close) * 100
+                        
+                        # Only include if Market Cap > 300M (using 30B here as realistic "High Cap" filter for this list, but list is already curated)
+                        mcap = info.get("marketCap")
+                        
+                        results.append({
+                            "symbol": symbol,
+                            "name": info.get("shortName") or symbol,
+                            "price": price,
+                            "change": change,
+                            "changePercent": change_percent,
+                            "marketCap": mcap
+                        })
+                except Exception as e:
+                    # Skip failures for individual tickers
+                    continue
+            
+            # Sort by absolute change percent desc (Movers) OR just Top Gainers
+            # User asked for "Highest Change" imply Gainers usually, or volatility. 
+            # Let's sort by Change Percent Descending (Top Gainers)
+            results.sort(key=lambda x: x["changePercent"], reverse=True)
+            
+            return jsonify({"quotes": results[:10]})
+            
+        except Exception as e:
+            return jsonify({"error": "Failed to fetch market movers", "details": str(e)}), 500
+
     # --- SEARCH implementation (unchanged logic but cleaner) ---
     if qtype == "search":
         query_str = request.args.get("query")

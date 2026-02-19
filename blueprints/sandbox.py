@@ -6,7 +6,7 @@ from flask import Blueprint, request, jsonify
 from database import query
 import yfinance as yf
 import datetime
-import time
+
 
 sandbox_bp = Blueprint("sandbox", __name__)
 
@@ -258,76 +258,93 @@ def trade_stock(sandbox_id):
         current_balance = float(sandbox["balance"])
         
         # 3. Validation & Execution Logic
-        new_balance = current_balance
-        
         if trade_type == "BUY":
-            if current_balance < total_cost:
-                return jsonify({"error": f"Insufficient funds (${current_balance:.2f} < ${total_cost:.2f})"}), 400
-            
-            new_balance = current_balance - total_cost
-            query("UPDATE sandboxes SET balance = %s WHERE id = %s", (new_balance, sandbox_id))
-            
-            # Update Portfolio
-            existing = query(
-                "SELECT quantity, average_buy_price FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s",
-                (sandbox_id, symbol),
-                fetchone=True
-            )
-            
-            if existing:
-                old_qty = float(existing["quantity"])
-                old_avg = float(existing["average_buy_price"])
-                new_qty = old_qty + quantity
-                new_avg = ((old_qty * old_avg) + (quantity * price)) / new_qty
-                
-                query(
-                    "UPDATE sandbox_portfolio SET quantity = %s, average_buy_price = %s WHERE sandbox_id = %s AND symbol = %s",
-                    (new_qty, new_avg, sandbox_id, symbol)
-                )
-            else:
-                query(
-                    "INSERT INTO sandbox_portfolio (sandbox_id, symbol, quantity, average_buy_price) VALUES (%s, %s, %s, %s)",
-                    (sandbox_id, symbol, quantity, price)
-                )
-                
+            return _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balance)
         elif trade_type == "SELL":
-            existing = query(
-                "SELECT quantity FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s",
-                (sandbox_id, symbol),
-                fetchone=True
-            )
-            owned_qty = float(existing["quantity"]) if existing else 0
+            return _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balance)
             
-            if owned_qty < quantity:
-                return jsonify({"error": f"Insufficient shares ({owned_qty} < {quantity})"}), 400
-                
-            new_balance = current_balance + total_cost
-            query("UPDATE sandboxes SET balance = %s WHERE id = %s", (new_balance, sandbox_id))
-            
-            new_qty = owned_qty - quantity
-            if new_qty <= 0.000001:
-                query("DELETE FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s", (sandbox_id, symbol))
-            else:
-                query(
-                    "UPDATE sandbox_portfolio SET quantity = %s WHERE sandbox_id = %s AND symbol = %s",
-                    (new_qty, sandbox_id, symbol)
-                )
-                
-        # 4. Record Transaction
-        query(
-            "INSERT INTO sandbox_transactions (sandbox_id, symbol, type, quantity, price) VALUES (%s, %s, %s, %s, %s)",
-            (sandbox_id, symbol, trade_type, quantity, price)
-        )
-        
-        return jsonify({
-            "ok": True, 
-            "type": trade_type, 
-            "symbol": symbol, 
-            "price": price, 
-            "quantity": quantity, 
-            "total": total_cost,
-            "new_balance": new_balance
-        })
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+def _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balance):
+    if current_balance < total_cost:
+        return jsonify({"error": f"Insufficient funds (${current_balance:.2f} < ${total_cost:.2f})"}), 400
+    
+    new_balance = current_balance - total_cost
+    query("UPDATE sandboxes SET balance = %s WHERE id = %s", (new_balance, sandbox_id))
+    
+    # Update Portfolio
+    existing = query(
+        "SELECT quantity, average_buy_price FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s",
+        (sandbox_id, symbol),
+        fetchone=True
+    )
+    
+    if existing:
+        old_qty = float(existing["quantity"])
+        old_avg = float(existing["average_buy_price"])
+        new_qty = old_qty + quantity
+        new_avg = ((old_qty * old_avg) + (quantity * price)) / new_qty
+        
+        query(
+            "UPDATE sandbox_portfolio SET quantity = %s, average_buy_price = %s WHERE sandbox_id = %s AND symbol = %s",
+            (new_qty, new_avg, sandbox_id, symbol)
+        )
+    else:
+        query(
+            "INSERT INTO sandbox_portfolio (sandbox_id, symbol, quantity, average_buy_price) VALUES (%s, %s, %s, %s)",
+            (sandbox_id, symbol, quantity, price)
+        )
+        
+    _record_transaction(sandbox_id, symbol, "BUY", quantity, price)
+    
+    return jsonify({
+        "ok": True, 
+        "type": "BUY", 
+        "symbol": symbol, 
+        "price": price, 
+        "quantity": quantity, 
+        "total": total_cost,
+        "new_balance": new_balance
+    })
+
+def _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balance):
+    existing = query(
+        "SELECT quantity FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s",
+        (sandbox_id, symbol),
+        fetchone=True
+    )
+    owned_qty = float(existing["quantity"]) if existing else 0
+    
+    if owned_qty < quantity:
+        return jsonify({"error": f"Insufficient shares ({owned_qty} < {quantity})"}), 400
+        
+    new_balance = current_balance + total_cost
+    query("UPDATE sandboxes SET balance = %s WHERE id = %s", (new_balance, sandbox_id))
+    
+    new_qty = owned_qty - quantity
+    if new_qty <= 0.000001:
+        query("DELETE FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s", (sandbox_id, symbol))
+    else:
+        query(
+            "UPDATE sandbox_portfolio SET quantity = %s WHERE sandbox_id = %s AND symbol = %s",
+            (new_qty, sandbox_id, symbol)
+        )
+        
+    _record_transaction(sandbox_id, symbol, "SELL", quantity, price)
+    
+    return jsonify({
+        "ok": True, 
+        "type": "SELL", 
+        "symbol": symbol, 
+        "price": price, 
+        "quantity": quantity, 
+        "total": total_cost,
+        "new_balance": new_balance
+    })
+
+def _record_transaction(sandbox_id, symbol, trade_type, quantity, price):
+    query(
+        "INSERT INTO sandbox_transactions (sandbox_id, symbol, type, quantity, price) VALUES (%s, %s, %s, %s, %s)",
+        (sandbox_id, symbol, trade_type, quantity, price)
+    )
