@@ -251,7 +251,7 @@ def trade_stock(sandbox_id):
         total_cost = price * quantity
         
         # 2. Get Sandbox state
-        sandbox = query("SELECT balance FROM sandboxes WHERE id = %s", (sandbox_id,), fetchone=True)
+        sandbox = query("SELECT * FROM sandboxes WHERE id = %s", (sandbox_id,), fetchone=True)
         if not sandbox:
             return jsonify({"error": "Sandbox not found"}), 404
             

@@ -144,7 +144,7 @@ def create():
         )
 
         # Check if debt is fully paid → auto-delete
-        debt = query("SELECT amount FROM debts WHERE id = %s", (debt_id,), fetchone=True)
+        debt = query("SELECT * FROM debts WHERE id = %s", (debt_id,), fetchone=True)
         sub_total = query(
             "SELECT COALESCE(SUM(amount), 0) AS total FROM sub_debts WHERE debt_id = %s",
             (debt_id,),

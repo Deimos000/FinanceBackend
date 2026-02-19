@@ -99,9 +99,12 @@ def save_transaction(t, account_id):
 
     # 1. Check if we need to migrate an old ID
     # If old_id exists in DB but new_id does not, we update the ID.
-    existing_old = query("SELECT 1 FROM transactions WHERE transaction_id = %s", (old_id,), fetchone=True)
-    existing_new = query("SELECT 1 FROM transactions WHERE transaction_id = %s", (new_id,), fetchone=True)
-    
+    rows_old = query("SELECT 1 FROM transactions WHERE transaction_id = %s", (old_id,), fetchall=True)
+    existing_old = rows_old[0] if rows_old else None
+
+    rows_new = query("SELECT 1 FROM transactions WHERE transaction_id = %s", (new_id,), fetchall=True)
+    existing_new = rows_new[0] if rows_new else None
+
     if existing_old and not existing_new:
         # MIGRATE
         print(f"DEBUG: [save_transaction] Migrating old_id={old_id} to new_id={new_id}")
