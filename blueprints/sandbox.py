@@ -5,10 +5,145 @@ Sandbox blueprint – CRUD for stock sandboxes and trading logic.
 from flask import Blueprint, request, jsonify
 from database import query
 import yfinance as yf
+import pandas as pd
 import datetime
 
-
 sandbox_bp = Blueprint("sandbox", __name__)
+
+def _get_historical_prices(symbols, start_date):
+    """
+    Fetch historical close prices for given symbols from start_date to now.
+    Returns a DataFrame accessed by [date][symbol].
+    """
+    if not symbols: return pd.DataFrame()
+    
+    try:
+        # yfinance expects YYYY-MM-DD string
+        start_str = start_date.strftime('%Y-%m-%d')
+        # Download all at once
+        data = yf.download(symbols, start=start_str, progress=False)['Close']
+        
+        # If single symbol, yfinance returns Series (or DF with 1 col). Ensure DF.
+        if isinstance(data, pd.Series):
+            data = data.to_frame(name=symbols[0])
+            
+        # Forward fill missing data (weekend/holidays) then backward fill
+        data = data.ffill().bfill()
+        
+        return data
+    except Exception as e:
+        print(f"Error fetching historical prices: {e}")
+        return pd.DataFrame()
+
+def _calculate_portfolio_history(sandbox_id, initial_balance, transactions, created_at):
+    """
+    Reconstruct daily portfolio value from transactions.
+    """
+    try:
+        # 1. Timeline Setup
+        # Start from creation date or first transaction, whichever is earlier
+        start_date = created_at.date()
+        if transactions:
+            first_tx_date = transactions[0]['executed_at'].date()
+            if first_tx_date < start_date:
+                start_date = first_tx_date
+                
+        # Generate date range until today
+        end_date = datetime.date.today()
+        # Create a date range (pandas DateTimeIndex)
+        all_dates = pd.date_range(start_date, end_date)
+        
+        # 2. Identify all symbols involved
+        symbols = set(t['symbol'] for t in transactions)
+        
+        # 3. Fetch Historical Prices
+        price_df = _get_historical_prices(list(symbols), start_date)
+        
+        # Reindex to ensure we have values for every single day in the range
+        # This handles weekends/holidays by carrying forward the last close price
+        if not price_df.empty:
+            price_df = price_df.reindex(all_dates).ffill().bfill()
+        
+        # Format timestamps for efficient lookup
+        # price_df index is DatetimeIndex. We'll map dates to prices.
+        
+        # 4. Reconstruct State Day-by-Day
+        history = []
+        
+        current_cash = float(initial_balance)
+        current_holdings = {sym: 0.0 for sym in symbols}
+        
+        # Organize transactions by date for quick access
+        tx_by_date = {}
+        for t in transactions:
+            d = t['executed_at'].date()
+            if d not in tx_by_date: tx_by_date[d] = []
+            tx_by_date[d].append(t)
+            
+        for single_date in all_dates:
+            date_obj = single_date.date()
+            
+            # Apply transactions for this day
+            if date_obj in tx_by_date:
+                for t in tx_by_date[date_obj]:
+                    qty = float(t['quantity'])
+                    price = float(t['price'])
+                    total = qty * price
+                    sym = t['symbol']
+                    
+                    if t['type'] == 'BUY':
+                        current_cash -= total
+                        current_holdings[sym] += qty
+                    elif t['type'] == 'SELL':
+                        current_cash += total
+                        current_holdings[sym] -= qty
+            
+            # Calculate Equity
+            equity_holdings = 0.0
+            
+            # Check if we have price data for this date
+            # We use 'single_date' (Timestamp) to lookup in DataFrame
+            try:
+                if not price_df.empty and single_date in price_df.index:
+                    prices_today = price_df.loc[single_date]
+                    for sym, qty in current_holdings.items():
+                        if qty > 0:
+                            # Handle potential missing columns or NaN
+                            if sym in prices_today:
+                                p = float(prices_today[sym])
+                                # Fallback if nan
+                                if pd.isna(p): p = 0.0
+                                equity_holdings += qty * p
+                else:
+                     # Fallback: if no price data for this specific day (e.g. weekend/holidays if not filled),
+                     # use the last known value? yfinance reindex usually handles this if we implement it right.
+                     # But if we are iterating strict calendar days and yfinance only gave trading days...
+                     # We should reindex price_df to all_dates beforehand to be safe.
+                     pass 
+            except Exception as e:
+                # print(f"Error calculating equity for {date_obj}: {e}")
+                pass
+
+            total_equity = current_cash + equity_holdings
+            
+            # Add to history
+            history.append({
+                "timestamp": single_date.timestamp() * 1000,
+                "value": total_equity
+            })
+            
+        # Re-fill missing values in our history list if any (shouldn't be with this loop)
+        return history
+
+    except Exception as e:
+        print(f"History calc error: {e}")
+        # Fallback to simple line
+        now_ts = datetime.datetime.now().timestamp() * 1000
+        start_ts = created_at.timestamp() * 1000
+        return [
+            {"timestamp": start_ts, "value": initial_balance},
+            {"timestamp": now_ts, "value": initial_balance} # Should ideally be current equity
+        ]
 
 def _get_current_price(symbol):
     """Helper to get real-time price from yfinance."""
@@ -182,24 +317,16 @@ def get_portfolio(sandbox_id):
 
         total_equity = cash_balance + holdings_value
 
-        # 4. Generate Equity History (Simplified)
-        # Without historical portfolio snapshots, we interpolate from Initial -> Current
-        # Or use transactions to build a 'step' chart of cash + approximate value.
-        # For now, we will provide a simple 2-point history to enable the chart.
-        # Start: Created At, Value: Initial Balance
-        # End: Now, Value: Total Equity
+        # 4. Generate Equity History
+        # Fetch all transactions to reconstruct history
+        transactions = query(
+            "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s ORDER BY executed_at ASC",
+            (sandbox_id,),
+            fetchall=True
+        )
         
-        start_ts = sandbox["created_at"].timestamp() * 1000
-        now_ts = datetime.datetime.now().timestamp() * 1000
+        equity_history = _calculate_portfolio_history(sandbox_id, initial_balance, transactions, sandbox["created_at"])
         
-        equity_history = [
-            {"timestamp": start_ts, "value": initial_balance},
-            {"timestamp": now_ts, "value": total_equity}
-        ]
-        
-        # Improve history if we have transactions?
-        # TODO: Implement full historical reconstruction later if needed.
-
         return jsonify({
             "portfolio": results,
             "cash_balance": cash_balance,
