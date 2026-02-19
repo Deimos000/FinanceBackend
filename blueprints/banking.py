@@ -312,25 +312,36 @@ def refresh():
     headers = _api_headers()
 
     updated = []
+    stats = {"processed": 0, "new_tx": 0, "errors": []}
+    
+    print(f"DEBUG: [refresh] Received request for {len(accounts)} accounts") 
+
     for acc in accounts:
         # Fix: check for "id" as well
         uid = acc.get("raw", {}).get("uid") or acc.get("account_id") or acc.get("uid") or acc.get("id")
         if not uid or not isinstance(uid, str):
-            log.warning("[refresh] Skipping account – no valid uid. Keys: %s", list(acc.keys()))
+            msg = f"Skipping account – no valid uid. Keys: {list(acc.keys())}"
+            log.warning(f"[refresh] {msg}")
+            print(f"DEBUG: [refresh] {msg}")
+            stats["errors"].append(msg)
             updated.append(acc)
             continue
 
         log.info("[refresh] Processing uid=%s", uid)
+        print(f"DEBUG: [refresh] Processing uid={uid}")
+        stats["processed"] += 1
 
         try:
             # Save/update account row first
             _save_account_to_db(acc)
 
             bal_resp = requests.get(f"{API_BASE}/accounts/{uid}/balances", headers=headers)
+            print(f"DEBUG: [refresh] Balance status: {bal_resp.status_code}")
             
             # Fetch transactions with pagination
             date_from = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 730 * 86400))
             transactions = _fetch_all_transactions(uid, headers, date_from)
+            print(f"DEBUG: [refresh] Fetched {len(transactions)} transactions from API")
 
             if bal_resp.ok:
                 bal_data = bal_resp.json()
@@ -360,6 +371,8 @@ def refresh():
                     log.error("[refresh] Failed to save transaction: %s", tx_err)
             
             log.info("[refresh] ✅ Added %d new transactions for %s", new_tx_count, uid)
+            print(f"DEBUG: [refresh] ✅ Added {new_tx_count} new transactions for {uid}")
+            stats["new_tx"] += new_tx_count
                     
             if not bal_resp.ok and bal_resp.status_code == 401:
                  # Check if transaction fetch also failed with 401/403 which would imply session expired
@@ -367,14 +380,18 @@ def refresh():
                  # For now, rely on balance response for session validity check
                  acc["sessionExpired"] = True
                  log.warning("[refresh] Session expired for %s (balance check)", uid)
+                 print(f"DEBUG: [refresh] Session expired for {uid}")
 
             _save_account_to_db(acc)
 
         except Exception as e:
             tb = traceback.format_exc()
             log.error("[refresh] ❌ Error for %s: %s\n%s", uid, e, tb)
+            print(f"DEBUG: [refresh] ❌ Error for {uid}: {e}")
+            stats["errors"].append(str(e))
 
         updated.append(acc)
 
     log.info("[refresh] ✅ Refresh completed for %d account(s)", len(updated))
-    return jsonify({"accounts": updated})
+    print(f"DEBUG: [refresh] Finished. Stats: {stats}")
+    return jsonify({"accounts": updated, "stats": stats})
