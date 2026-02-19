@@ -81,7 +81,7 @@ ENABLE_BANKING_REDIRECT_URL = os.environ.get(
 )
 
 # ── Gemini / AI ───────────────────────────────────────────
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDpY88195Xs2VPBm2sxcbJ2o4e89QkQot0")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 # ── Flask ─────────────────────────────────────────────────
 PORT = int(os.environ.get("PORT", 5000))
