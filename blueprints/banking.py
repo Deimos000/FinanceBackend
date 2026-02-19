@@ -333,6 +333,7 @@ def refresh():
             updated.append(acc)
             continue
 
+
         log.info("[refresh] Processing uid=%s", uid)
         stats["processed"] += 1
 
@@ -346,7 +347,7 @@ def refresh():
             # Fetch transactions – Enable Banking only supports last 90 days
             date_from = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 89 * 86400))
             transactions = _fetch_all_transactions(uid, headers, date_from)
-            print(f"DEBUG: [refresh] Fetched {len(transactions)} transactions from API")
+            print(f"DEBUG: [refresh] Fetched {len(transactions)} transactions from API for account {uid}")
 
             if bal_resp.ok:
                 bal_data = bal_resp.json()
@@ -367,16 +368,26 @@ def refresh():
             log.info("[refresh] Got %d transactions for %s", len(transactions), uid)
             
             new_tx_count = 0
+            existing_tx_count = 0
+            
+            # Ensure we use the correct account ID that matches what's in the DB
+            target_account_id = acc.get("account_id") or uid
+            print(f"DEBUG: [refresh] Saving transactions using account_id={target_account_id}")
+
             for t in transactions:
                 try:
-                    is_new = save_transaction(t, acc.get("account_id") or uid)
+                    is_new = save_transaction(t, target_account_id)
                     if is_new:
                         new_tx_count += 1
+                    else:
+                        existing_tx_count += 1
                 except Exception as tx_err:
                     log.error("[refresh] Failed to save transaction: %s", tx_err)
+                    print(f"DEBUG: [refresh] Failed to save transaction: {tx_err}")
             
-            log.info("[refresh] ✅ Added %d new transactions for %s", new_tx_count, uid)
-            print(f"DEBUG: [refresh] ✅ Added {new_tx_count} new transactions for {uid}")
+            log.info("[refresh] ✅ Added %d new transactions (skipped %d existing) for %s", 
+                     new_tx_count, existing_tx_count, uid)
+            print(f"DEBUG: [refresh] ✅ Added {new_tx_count} new transactions (skipped {existing_tx_count} existing) for {uid}")
             stats["new_tx"] += new_tx_count
                     
             if not bal_resp.ok and bal_resp.status_code == 401:
@@ -400,3 +411,4 @@ def refresh():
     log.info("[refresh] ✅ Refresh completed for %d account(s)", len(updated))
     print(f"DEBUG: [refresh] Finished. Stats: {stats}")
     return jsonify({"accounts": updated, "stats": stats})
+

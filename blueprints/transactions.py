@@ -58,6 +58,7 @@ def _robust_stable_id(t, account_id):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+
 def save_transaction(t, account_id):
     """
     Upsert one raw transaction dict into the database.
@@ -103,11 +104,17 @@ def save_transaction(t, account_id):
     
     if existing_old and not existing_new:
         # MIGRATE
+        print(f"DEBUG: [save_transaction] Migrating old_id={old_id} to new_id={new_id}")
         query("UPDATE transactions SET transaction_id = %s WHERE transaction_id = %s", (new_id, old_id))
         # After migration, it counts as "existing" since we just updated the ID
         existing_new = True 
 
+    if existing_new:
+        print(f"DEBUG: [save_transaction] Skipping existing transaction {new_id} ({amount} {currency} on {booking})")
+        return False
+
     # 2. Upsert
+    print(f"DEBUG: [save_transaction] Inserting NEW transaction {new_id} ({amount} {currency} on {booking})")
     query(
         """
         INSERT INTO transactions
@@ -135,8 +142,8 @@ def save_transaction(t, account_id):
         ),
     )
     
-    # Return True if it was NOT existing before (meaning we inserted a new one)
-    return not existing_new
+    return True
+
 
 
 # ── routes ─────────────────────────────────────────────────
