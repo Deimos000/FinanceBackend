@@ -12,8 +12,8 @@ transactions_bp = Blueprint("transactions", __name__)
 
 # ── helpers ────────────────────────────────────────────────
 
-def _stable_id(t, account_id):
-    """Derive a deterministic transaction id."""
+def _legacy_stable_id(t, account_id):
+    """Derive a deterministic transaction id (LEGACY method)."""
     tid = t.get("transaction_id") or t.get("transactionId") or t.get("entry_reference")
     if tid:
         return str(tid)
@@ -21,8 +21,48 @@ def _stable_id(t, account_id):
     return base64.b64encode(raw.encode()).decode()
 
 
+def _robust_stable_id(t, account_id):
+    """
+    Derive a robust deterministic transaction id using SHA256.
+    Includes more fields to prevent collisions on same-day, same-amount transactions.
+    """
+    # 1. Prefer explicit bank ID if available
+    tid = t.get("transaction_id") or t.get("transactionId") or t.get("entry_reference")
+    if tid:
+        return str(tid)
+
+    # 2. Construct unique string from fields
+    # We include: account_id, date, amount, currency, recipient, sender, remittance
+    
+    amount = t.get("amount")
+    # Handle amount dict or value
+    if isinstance(amount, dict):
+        amt_val = amount.get("amount", 0)
+        curr = amount.get("currency", "EUR")
+    else:
+        amt_val = amount
+        curr = t.get("currency", "EUR")
+        
+    booking_date = t.get("booking_date") or t.get("date") or ""
+    
+    creditor = t.get("creditor_name") or (t.get("creditor") or {}).get("name") or ""
+    debtor   = t.get("debtor_name") or (t.get("debtor") or {}).get("name") or ""
+    
+    remittance = t.get("remittance_information") or t.get("remittance_information_unstructured") or ""
+    if isinstance(remittance, list):
+        remittance = " ".join(remittance)
+
+    raw = f"{account_id}|{booking_date}|{amt_val}|{curr}|{creditor}|{debtor}|{remittance}"
+    
+    # Return SHA256 hash
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
 def save_transaction(t, account_id):
-    """Upsert one raw transaction dict into the database."""
+    """
+    Upsert one raw transaction dict into the database.
+    Returns True if a NEW transaction was inserted, False if updated/existing.
+    """
     amount = 0.0
     ta = t.get("transaction_amount") or {}
     if ta.get("amount"):
@@ -36,7 +76,9 @@ def save_transaction(t, account_id):
     elif indicator in ("CRDT", "C"):
         amount = abs(amount)
 
-    stable_id = _stable_id(t, account_id)
+    # Calculate IDs
+    new_id = _robust_stable_id(t, account_id)
+    old_id = _legacy_stable_id(t, account_id)
 
     creditor = t.get("creditor_name") or (t.get("creditor") or {}).get("name")
     debtor   = t.get("debtor_name") or (t.get("debtor") or {}).get("name")
@@ -54,6 +96,18 @@ def save_transaction(t, account_id):
     booking = t.get("value_date") or t.get("booking_date") or t.get("bookingDate")
     currency = ta.get("currency") or t.get("currency") or "EUR"
 
+    # 1. Check if we need to migrate an old ID
+    # If old_id exists in DB but new_id does not, we update the ID.
+    existing_old = query("SELECT 1 FROM transactions WHERE transaction_id = %s", (old_id,), one=True)
+    existing_new = query("SELECT 1 FROM transactions WHERE transaction_id = %s", (new_id,), one=True)
+    
+    if existing_old and not existing_new:
+        # MIGRATE
+        query("UPDATE transactions SET transaction_id = %s WHERE transaction_id = %s", (new_id, old_id))
+        # After migration, it counts as "existing" since we just updated the ID
+        existing_new = True 
+
+    # 2. Upsert
     query(
         """
         INSERT INTO transactions
@@ -69,7 +123,7 @@ def save_transaction(t, account_id):
             raw_json               = EXCLUDED.raw_json
         """,
         (
-            stable_id,
+            new_id,
             account_id,
             booking,
             amount,
@@ -80,6 +134,9 @@ def save_transaction(t, account_id):
             json.dumps(t),
         ),
     )
+    
+    # Return True if it was NOT existing before (meaning we inserted a new one)
+    return not existing_new
 
 
 # ── routes ─────────────────────────────────────────────────

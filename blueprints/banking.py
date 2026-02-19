@@ -313,7 +313,8 @@ def refresh():
 
     updated = []
     for acc in accounts:
-        uid = acc.get("raw", {}).get("uid") or acc.get("account_id") or acc.get("uid")
+        # Fix: check for "id" as well
+        uid = acc.get("raw", {}).get("uid") or acc.get("account_id") or acc.get("uid") or acc.get("id")
         if not uid or not isinstance(uid, str):
             log.warning("[refresh] Skipping account – no valid uid. Keys: %s", list(acc.keys()))
             updated.append(acc)
@@ -349,11 +350,16 @@ def refresh():
             acc["transactions"] = transactions
             log.info("[refresh] Got %d transactions for %s", len(transactions), uid)
             
+            new_tx_count = 0
             for t in transactions:
                 try:
-                    save_transaction(t, acc.get("account_id") or uid)
+                    is_new = save_transaction(t, acc.get("account_id") or uid)
+                    if is_new:
+                        new_tx_count += 1
                 except Exception as tx_err:
                     log.error("[refresh] Failed to save transaction: %s", tx_err)
+            
+            log.info("[refresh] ✅ Added %d new transactions for %s", new_tx_count, uid)
                     
             if not bal_resp.ok and bal_resp.status_code == 401:
                  # Check if transaction fetch also failed with 401/403 which would imply session expired
