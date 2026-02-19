@@ -2,6 +2,7 @@ from flask import Blueprint, jsonify, request
 from database import query
 from services.gemini import categorize_transactions
 import json
+from datetime import datetime, timedelta
 
 statistics_bp = Blueprint('statistics', __name__)
 
@@ -69,11 +70,7 @@ def category_trends():
     
     rows = query(sql, (start_date, end_date), fetchall=True)
     
-    # Structure: { "Category Name": [ { date: "YYYY-MM-DD", amount: 123.45 }, ... ] }
     results = {}
-    
-    # Get all categories to ensure we have colors if needed (or frontend handles it)
-    # For now, just grouping data.
     
     for r in rows:
         cat = r['category']
@@ -87,14 +84,112 @@ def category_trends():
         
     return jsonify(results)
 
+
+@statistics_bp.route('/api/stats/monthly-cashflow', methods=['GET'])
+def monthly_cashflow():
+    """
+    Returns monthly income and spending for the last N months.
+    Each item: { month: "YYYY-MM", income: float, spending: float }
+    """
+    months = request.args.get('months', 6, type=int)
+    cutoff = (datetime.utcnow() - timedelta(days=months * 31)).strftime('%Y-%m-%d')
+
+    rows = query("""
+        SELECT
+            TO_CHAR(booking_date, 'YYYY-MM') AS month,
+            SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS income,
+            SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) AS spending
+        FROM transactions
+        WHERE booking_date >= %s
+        GROUP BY TO_CHAR(booking_date, 'YYYY-MM')
+        ORDER BY month ASC
+    """, (cutoff,), fetchall=True)
+
+    results = []
+    for r in rows:
+        results.append({
+            'month': r['month'],
+            'income': float(r['income'] or 0),
+            'spending': float(r['spending'] or 0),
+        })
+
+    return jsonify(results)
+
+
+# ── Budget Settings ────────────────────────────────────────
+
+@statistics_bp.route('/api/budget/settings', methods=['GET'])
+def get_budget_settings():
+    """Returns the global budget settings (monthly income target)."""
+    row = query("SELECT monthly_income FROM budget_settings ORDER BY id LIMIT 1", fetchone=True)
+    if not row:
+        return jsonify({'monthly_income': 0})
+    return jsonify({'monthly_income': float(row['monthly_income'])})
+
+
+@statistics_bp.route('/api/budget/settings', methods=['PUT'])
+def update_budget_settings():
+    """Updates the monthly income target."""
+    data = request.get_json()
+    monthly_income = data.get('monthly_income', 0)
+
+    # Upsert: update existing row or insert if empty
+    existing = query("SELECT id FROM budget_settings ORDER BY id LIMIT 1", fetchone=True)
+    if existing:
+        query(
+            "UPDATE budget_settings SET monthly_income = %s, updated_at = NOW() WHERE id = %s",
+            (monthly_income, existing['id'])
+        )
+    else:
+        query(
+            "INSERT INTO budget_settings (monthly_income) VALUES (%s)",
+            (monthly_income,)
+        )
+
+    return jsonify({'status': 'updated', 'monthly_income': monthly_income})
+
+
+# ── Category Budgets ───────────────────────────────────────
+
+@statistics_bp.route('/api/budget/categories', methods=['GET'])
+def get_category_budgets():
+    """Returns all categories with their monthly_budget limits."""
+    rows = query(
+        "SELECT name, color, icon, COALESCE(monthly_budget, 0) as monthly_budget FROM categories ORDER BY name",
+        fetchall=True
+    )
+    results = []
+    for r in rows:
+        results.append({
+            'name': r['name'],
+            'color': r['color'],
+            'icon': r['icon'],
+            'monthly_budget': float(r['monthly_budget'] or 0),
+        })
+    return jsonify(results)
+
+
+@statistics_bp.route('/api/budget/categories/<string:category_name>', methods=['PUT'])
+def update_category_budget(category_name):
+    """Updates the monthly_budget for a specific category."""
+    data = request.get_json()
+    monthly_budget = data.get('monthly_budget', 0)
+
+    query(
+        "UPDATE categories SET monthly_budget = %s WHERE name = %s",
+        (monthly_budget, category_name)
+    )
+    return jsonify({'status': 'updated', 'name': category_name, 'monthly_budget': monthly_budget})
+
+
+# ── Categorization ─────────────────────────────────────────
+
 @statistics_bp.route('/api/stats/categorize', methods=['POST'])
 def trigger_categorization():
     """
     Finds uncategorized transactions AND transactions categorized as 'Other'
     and uses Gemini to categorize them.
     """
-    # 1. Find target transactions (limit to prevent huge batches)
-    # Target: NULL, empty string, or 'Other'
     uncategorized = query("""
         SELECT transaction_id, remittance_information, creditor_name, amount
         FROM transactions
@@ -106,21 +201,14 @@ def trigger_categorization():
     if not uncategorized:
         return jsonify({"message": "No transactions to categorize found", "count": 0})
         
-    # 2. Call Gemini
-    # Convert rows (dicts) to list for the service
     tx_list = [dict(row) for row in uncategorized]
     category_map = categorize_transactions(tx_list)
     
     if not category_map:
         return jsonify({"message": "AI Categorization failed or returned no results", "count": 0}), 500
 
-    # 3. Update Database
     updated_count = 0
     for tx_id, category in category_map.items():
-        # gemini.py says it returns "Other" sometimes.
-        # If Gemini returns "Other", we might as well keep it (or original was Other).
-        # But if it finds a better match, we update.
-        
         query("""
             UPDATE transactions
             SET category = %s
