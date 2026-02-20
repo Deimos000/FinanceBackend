@@ -152,6 +152,44 @@ def auth_url():
     return jsonify({"url": data["url"]})
 
 
+# ── search-banks ──────────────────────────────────────────────
+
+@banking_bp.route("/api/banking/search-banks", methods=["GET"])
+def search_banks():
+    """Search available banks/ASPSPs via Enable Banking directory."""
+    query = request.args.get("query", "")
+    country = request.args.get("country", "DE")
+
+    log.info("[search-banks] Searching for bank=%s country=%s", query, country)
+
+    headers = _api_headers()
+    params = {"country": country}
+    if query:
+        params["name"] = query
+
+    resp = requests.get(f"{API_BASE}/aspsps", headers=headers, params=params)
+    log.info("[search-banks] Enable Banking responded: status=%s", resp.status_code)
+
+    if not resp.ok:
+        log.error("[search-banks] Error: %s %s", resp.status_code, resp.text[:200])
+        return jsonify({"error": f"Enable Banking API returned {resp.status_code}"}), resp.status_code
+
+    data = resp.json()
+    # Normalise to a clean list: [{name, country, logo?}]
+    aspsps = data if isinstance(data, list) else data.get("aspsps", [])
+    result = []
+    for a in aspsps:
+        result.append({
+            "name": a.get("name", ""),
+            "country": a.get("country", country),
+            "logo": a.get("logo"),
+            "bic": a.get("bic"),
+        })
+
+    log.info("[search-banks] Returning %d banks", len(result))
+    return jsonify({"banks": result})
+
+
 # ── helpers ─────────────────────────────────────────────────
 
 def _fetch_all_transactions(uid, headers, date_from):
