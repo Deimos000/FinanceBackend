@@ -119,7 +119,9 @@ def auth_url():
     body = request.get_json(force=True) or {}
     bank_name = body.get("bankName", "Commerzbank")
 
-    log.info("[auth-url] Requesting auth URL for bank=%s", bank_name)
+    country = body.get("country", "DE")
+
+    log.info("[auth-url] Requesting auth URL for bank=%s, country=%s", bank_name, country)
 
     headers = _api_headers()
     valid_until = time.strftime(
@@ -131,7 +133,7 @@ def auth_url():
         headers=headers,
         json={
             "access": {"valid_until": valid_until},
-            "aspsp": {"name": bank_name, "country": "DE"},
+            "aspsp": {"name": bank_name, "country": country},
             "state": "my-personal-request",
             "redirect_url": ENABLE_BANKING_REDIRECT_URL,
         },

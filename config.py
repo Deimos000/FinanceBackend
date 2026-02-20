@@ -77,7 +77,7 @@ if "\\n" in ENABLE_BANKING_PRIVATE_KEY:
     ENABLE_BANKING_PRIVATE_KEY = ENABLE_BANKING_PRIVATE_KEY.replace("\\n", "\n")
 
 ENABLE_BANKING_REDIRECT_URL = os.environ.get(
-    "ENABLE_BANKING_REDIRECT_URL", "https://localhost/"
+    "ENABLE_BANKING_REDIRECT_URL", "http://localhost:8081"
 )
 
 # ── Gemini / AI ───────────────────────────────────────────
