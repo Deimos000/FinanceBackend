@@ -121,7 +121,12 @@ def auth_url():
 
     country = body.get("country", "DE")
 
-    log.info("[auth-url] Requesting auth URL for bank=%s, country=%s", bank_name, country)
+    redirect_url = ENABLE_BANKING_REDIRECT_URL
+    app_id = ENABLE_BANKING_APP_ID
+
+    log.info("[auth-url] Requesting auth for bank=%s, country=%s", bank_name, country)
+    log.info("[auth-url] Using Redirect URL: %s", redirect_url)
+    log.info("[auth-url] Using App ID: %s", app_id)
 
     headers = _api_headers()
     valid_until = time.strftime(
@@ -135,7 +140,7 @@ def auth_url():
             "access": {"valid_until": valid_until},
             "aspsp": {"name": bank_name, "country": country},
             "state": "my-personal-request",
-            "redirect_url": ENABLE_BANKING_REDIRECT_URL,
+            "redirect_url": redirect_url,
         },
     )
 
@@ -143,7 +148,14 @@ def auth_url():
 
     if not resp.ok:
         log.error("[auth-url] Enable Banking error: %s %s", resp.status_code, resp.text)
-        return jsonify({"error": f"Enable Banking API returned {resp.status_code}", "details": resp.text}), resp.status_code
+        return jsonify({
+            "error": f"Enable Banking API returned {resp.status_code}", 
+            "details": resp.text,
+            "debug": {
+                "redirect_url": redirect_url,
+                "using_app_id": app_id,
+            }
+        }), resp.status_code
 
     data = resp.json()
     if not data.get("url"):
