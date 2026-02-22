@@ -15,7 +15,7 @@ if HAS_GEMINI and GEMINI_API_KEY:
     except Exception as e:
         print(f"Failed to configure Gemini: {e}")
 
-def categorize_transactions(transactions):
+def categorize_transactions(transactions, user_id=None):
     """
     Takes a list of transaction dictionaries (description, amount, etc.)
     and returns a list of categories corresponding to them.
@@ -27,8 +27,22 @@ def categorize_transactions(transactions):
     if not HAS_GEMINI:
         return {}
 
-    if not transactions or not GEMINI_API_KEY:
+    api_key_to_use = GEMINI_API_KEY
+
+    if user_id:
+        from database import query
+        user_record = query("SELECT gemini_api_key FROM users WHERE id = %s", (user_id,), fetchone=True)
+        if user_record and user_record.get("gemini_api_key"):
+            api_key_to_use = user_record["gemini_api_key"]
+
+    if not transactions or not api_key_to_use:
         return []
+
+    try:
+        genai.configure(api_key=api_key_to_use)
+    except Exception as e:
+        print(f"Failed to configure Gemini with specific key: {e}")
+        return {}
 
     model = genai.GenerativeModel('gemini-2.5-flash')
 

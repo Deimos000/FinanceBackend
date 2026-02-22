@@ -209,7 +209,7 @@ def trigger_categorization(user_id):
         return jsonify({"message": "No transactions to categorize found", "count": 0})
         
     tx_list = [dict(row) for row in uncategorized]
-    category_map = categorize_transactions(tx_list)
+    category_map = categorize_transactions(tx_list, user_id=user_id)
     
     if not category_map:
         return jsonify({"message": "AI Categorization failed or returned no results", "count": 0}), 500

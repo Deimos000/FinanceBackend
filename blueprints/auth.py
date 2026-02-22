@@ -91,3 +91,21 @@ def register():
     
     token = jwt.encode({"user_id": user_id}, SECRET_KEY, algorithm="HS256")
     return jsonify({"token": token, "user_id": user_id, "username": username}), 201
+
+@auth_bp.route("/auth/settings", methods=["GET"])
+@login_required
+def get_settings(user_id):
+    user = query("SELECT gemini_api_key FROM users WHERE id = %s", (user_id,), fetchone=True)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"gemini_api_key": user.get("gemini_api_key") or ""}), 200
+
+@auth_bp.route("/auth/settings", methods=["PUT", "OPTIONS"])
+@login_required
+def update_settings(user_id):
+    data = request.json or {}
+    gemini_api_key = data.get("gemini_api_key")
+    if gemini_api_key is not None:
+        query("UPDATE users SET gemini_api_key = %s WHERE id = %s", (gemini_api_key, user_id))
+    return jsonify({"message": "Settings updated"}), 200
+
