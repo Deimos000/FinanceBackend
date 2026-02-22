@@ -20,6 +20,8 @@ from blueprints.statistics import statistics_bp
 from blueprints.wishlist import wishlist_bp
 from blueprints.sandbox import sandbox_bp
 from blueprints.auth import auth_bp
+from blueprints.friends import friends_bp
+from blueprints.sharing import sharing_bp
 
 def create_app():
     # ── Configure logging for Cloud Run ──
@@ -51,6 +53,8 @@ def create_app():
     app.register_blueprint(wishlist_bp)
     app.register_blueprint(sandbox_bp)
     app.register_blueprint(auth_bp)
+    app.register_blueprint(friends_bp)
+    app.register_blueprint(sharing_bp)
     # Health check
     @app.route("/health")
     def health():

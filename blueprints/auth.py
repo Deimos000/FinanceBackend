@@ -4,7 +4,7 @@ from flask import Blueprint, request, jsonify
 import jwt
 from config import SECRET_KEY
 from database import query
-from werkzeug.security import check_password_hash
+from werkzeug.security import check_password_hash, generate_password_hash
 
 auth_bp = Blueprint("auth", __name__)
 log = logging.getLogger(__name__)
@@ -57,3 +57,37 @@ def login():
     token = jwt.encode({"user_id": user["id"]}, SECRET_KEY, algorithm="HS256")
     return jsonify({"token": token, "user_id": user["id"], "username": username}), 200
 
+@auth_bp.route("/auth/register", methods=["POST", "OPTIONS"])
+def register():
+    if request.method == "OPTIONS":
+        return {}, 200
+        
+    data = request.json or {}
+    username = data.get("username")
+    password = data.get("password")
+    
+    if not username or not password:
+        return jsonify({"error": "Username and password required"}), 400
+        
+    existing = query("SELECT id FROM users WHERE username = %(username)s", {"username": username}, fetchone=True)
+    if existing:
+        return jsonify({"error": "Username already exists"}), 400
+        
+    pwd_hash = generate_password_hash(password)
+    query("INSERT INTO users (username, password_hash) VALUES (%s, %s)", (username, pwd_hash))
+    
+    user = query("SELECT id FROM users WHERE username = %s", (username,), fetchone=True)
+    user_id = user["id"]
+    
+    # Strictly create ONE cash account for the new user
+    cash_account_id = f"CASH_{user_id}"
+    query(
+        """
+        INSERT INTO accounts (account_id, user_id, name, iban, balance, currency, bank_name, type, subtype)
+        VALUES (%s, %s, 'Cash Account', 'N/A', 0, 'EUR', 'Cash', 'cash', 'cash')
+        """,
+        (cash_account_id, user_id)
+    )
+    
+    token = jwt.encode({"user_id": user_id}, SECRET_KEY, algorithm="HS256")
+    return jsonify({"token": token, "user_id": user_id, "username": username}), 201

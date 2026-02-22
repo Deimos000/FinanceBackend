@@ -10,27 +10,11 @@ from blueprints.auth import login_required
 cash_bp = Blueprint("cash", __name__)
 
 
-def _ensure_cash_account(user_id):
-    """Create the cash account row if it doesn't exist, return it."""
-    cash_account_id = f"CASH_{user_id}"
-    acc = query(
-        "SELECT * FROM accounts WHERE account_id = %s AND user_id = %s",
-        (cash_account_id, user_id),
-        fetchone=True,
-    )
-    if acc:
-        return acc
-
-    query(
-        """
-        INSERT INTO accounts (account_id, user_id, name, iban, balance, currency, bank_name, type, subtype)
-        VALUES (%s, %s, 'Cash Account', 'N/A', 0, 'EUR', 'Cash', 'cash', 'cash')
-        """,
-        (cash_account_id, user_id),
-    )
+def _get_cash_account(user_id):
+    """Return the cash account for the user."""
     return query(
-        "SELECT * FROM accounts WHERE account_id = %s",
-        (cash_account_id,),
+        "SELECT * FROM accounts WHERE type = 'cash' AND user_id = %s LIMIT 1",
+        (user_id,),
         fetchone=True,
     )
 
@@ -38,7 +22,10 @@ def _ensure_cash_account(user_id):
 @cash_bp.route("/api/cash/account", methods=["GET"])
 @login_required
 def get_cash_account(user_id):
-    acc = _ensure_cash_account(user_id)
+    acc = _get_cash_account(user_id)
+    if not acc:
+        return jsonify({"error": "No cash account found"}), 404
+        
     acc["balance"] = float(acc["balance"])
 
     # Also fetch cash transactions
@@ -58,7 +45,9 @@ def get_cash_account(user_id):
 @cash_bp.route("/api/cash/account", methods=["POST"])
 @login_required
 def create_cash_account(user_id):
-    acc = _ensure_cash_account(user_id)
+    acc = _get_cash_account(user_id)
+    if not acc:
+        return jsonify({"error": "No cash account found"}), 404
     acc["balance"] = float(acc["balance"])
     return jsonify(acc)
 
@@ -68,7 +57,12 @@ def create_cash_account(user_id):
 def update_balance(user_id):
     body = request.get_json(force=True)
     new_balance = body.get("balance", 0)
-    cash_account_id = f"CASH_{user_id}"
+    
+    acc = _get_cash_account(user_id)
+    if not acc:
+        return jsonify({"error": "No cash account found"}), 404
+        
+    cash_account_id = acc["account_id"]
 
     query(
         "UPDATE accounts SET balance = %s, last_synced = NOW() WHERE account_id = %s AND user_id = %s",
@@ -85,7 +79,12 @@ def add_transaction(user_id):
     name = body.get("name", "Cash Deposit" if amount > 0 else "Cash Payment")
     description = body.get("description", "Manual Transaction")
     tx_id = str(uuid.uuid4())
-    cash_account_id = f"CASH_{user_id}"
+    
+    acc = _get_cash_account(user_id)
+    if not acc:
+        return jsonify({"error": "No cash account found"}), 404
+        
+    cash_account_id = acc["account_id"]
 
     display_name = f"{name} (cash)"
 

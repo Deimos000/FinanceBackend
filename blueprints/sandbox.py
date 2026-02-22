@@ -11,6 +11,40 @@ from blueprints.auth import login_required
 
 sandbox_bp = Blueprint("sandbox", __name__)
 
+
+def _check_sandbox_access(sandbox_id, user_id, required_permission="watch"):
+    """
+    Check if a user has access to a sandbox.
+    Returns (sandbox_owner_id, permission) or (None, None).
+    - Owner always has full access.
+    - Shared users checked against required_permission.
+    """
+    # Check ownership first
+    sandbox = query(
+        "SELECT id, user_id FROM sandboxes WHERE id = %s", (sandbox_id,), fetchone=True
+    )
+    if not sandbox:
+        return None, None
+
+    if sandbox["user_id"] == user_id:
+        return sandbox["user_id"], "owner"
+
+    # Check shared access
+    share = query(
+        "SELECT permission FROM sandbox_shares WHERE sandbox_id = %s AND shared_with_id = %s",
+        (sandbox_id, user_id),
+        fetchone=True,
+    )
+    if not share:
+        return None, None
+
+    permission = share["permission"]
+    # For 'edit' required, only 'edit' permission works
+    if required_permission == "edit" and permission != "edit":
+        return None, None
+
+    return sandbox["user_id"], permission
+
 def _get_historical_prices(symbols, start_date):
     """
     Fetch historical close prices for given symbols from start_date to now.
@@ -186,14 +220,9 @@ def get_sandboxes(user_id):
         results = []
         
         if sandboxes:
-            # 1. Fetch all portfolio items for all sandboxes to minimize queries
-            # Ideally we'd do a JOIN, but for simplicity we can fetch all and map in python
-            # or fetching per sandbox (N+1) might be slow if many sandboxes.
-            # Let's fetch all portfolio items in one go.
             all_portfolio_items = query("SELECT * FROM sandbox_portfolio", fetchall=True)
             
-            # Map items to sandbox_id
-            portfolio_map = {} # sandbox_id -> [items]
+            portfolio_map = {}
             all_symbols = set()
             
             if all_portfolio_items:
@@ -203,7 +232,6 @@ def get_sandboxes(user_id):
                     portfolio_map[sid].append(item)
                     all_symbols.add(item["symbol"])
             
-            # 2. Get current prices for all symbols
             prices = _get_current_prices(list(all_symbols))
             
             for s in sandboxes:
@@ -211,25 +239,33 @@ def get_sandboxes(user_id):
                 balance = float(s.get("balance"))
                 initial = float(s.get("initial_balance")) if s.get("initial_balance") else 10000.0
                 
-                # Calculate holdings value
                 holdings_value = 0.0
                 if sid in portfolio_map:
                     for item in portfolio_map[sid]:
                         sym = item["symbol"]
                         qty = float(item["quantity"])
-                        # Use current price or fallback to average buy price if lookup failed
                         price = prices.get(sym, float(item["average_buy_price"]))
                         holdings_value += (price * qty)
                 
                 total_equity = balance + holdings_value
+                
+                # Count shares for this sandbox
+                share_count = 0
+                shares_row = query(
+                    "SELECT COUNT(*) as cnt FROM sandbox_shares WHERE sandbox_id = %s",
+                    (sid,), fetchone=True
+                )
+                if shares_row:
+                    share_count = shares_row["cnt"]
                 
                 results.append({
                     "id": sid,
                     "name": s.get("name"),
                     "balance": balance,
                     "initial_balance": initial,
-                    "total_equity": total_equity, # Add this field!
+                    "total_equity": total_equity,
                     "created_at": str(s.get("created_at")),
+                    "share_count": share_count,
                 })
                 
         return jsonify({"sandboxes": results})
@@ -277,28 +313,31 @@ def delete_sandbox(sandbox_id, user_id):
 @sandbox_bp.route("/api/sandbox/<int:sandbox_id>/portfolio", methods=["GET"])
 @login_required
 def get_portfolio(sandbox_id, user_id):
-    """Get portfolio for a sandbox with current values and equity history."""
+    """Get portfolio for a sandbox with current values and equity history.
+    Supports shared access (watch or edit permission)."""
     try:
-        # 1. Get Holdings
+        # Check access (owner or shared)
+        owner_id, permission = _check_sandbox_access(sandbox_id, user_id, "watch")
+        if not owner_id:
+            return jsonify({"error": "Sandbox not found"}), 404
+
+        # Use owner_id for data queries since portfolio/transactions are stored under owner
         portfolio_items = query(
             "SELECT * FROM sandbox_portfolio WHERE sandbox_id = %s AND user_id = %s",
-            (sandbox_id, user_id),
+            (sandbox_id, owner_id),
             fetchall=True
         )
         
-        # 2. Get Cash Balance
-        sandbox = query("SELECT balance, initial_balance, created_at FROM sandboxes WHERE id = %s AND user_id = %s", (sandbox_id, user_id), fetchone=True)
+        sandbox = query("SELECT balance, initial_balance, created_at FROM sandboxes WHERE id = %s AND user_id = %s", (sandbox_id, owner_id), fetchone=True)
         if not sandbox:
             return jsonify({"error": "Sandbox not found"}), 404
             
         cash_balance = float(sandbox["balance"])
         initial_balance = float(sandbox["initial_balance"]) if sandbox["initial_balance"] else cash_balance
         
-        # 3. Calculate Current Value
         results = []
         holdings_value = 0.0
         
-        # Optimize price fetching
         symbols = [item["symbol"] for item in portfolio_items] if portfolio_items else []
         prices = _get_current_prices(symbols)
         
@@ -308,7 +347,7 @@ def get_portfolio(sandbox_id, user_id):
                 qty = float(item.get("quantity"))
                 avg_price = float(item.get("average_buy_price"))
                 
-                current_price = prices.get(symbol, avg_price) # Fallback to cost
+                current_price = prices.get(symbol, avg_price)
                 
                 current_val = (current_price * qty)
                 holdings_value += current_val
@@ -325,11 +364,9 @@ def get_portfolio(sandbox_id, user_id):
 
         total_equity = cash_balance + holdings_value
 
-        # 4. Generate Equity History
-        # Fetch all transactions to reconstruct history
         transactions = query(
             "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s AND user_id = %s ORDER BY executed_at ASC",
-            (sandbox_id, user_id),
+            (sandbox_id, owner_id),
             fetchall=True
         )
         
@@ -340,7 +377,8 @@ def get_portfolio(sandbox_id, user_id):
             "cash_balance": cash_balance,
             "initial_balance": initial_balance,
             "total_equity": total_equity,
-            "equity_history": equity_history
+            "equity_history": equity_history,
+            "permission": permission,
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -348,11 +386,15 @@ def get_portfolio(sandbox_id, user_id):
 @sandbox_bp.route("/api/sandbox/<int:sandbox_id>/transactions", methods=["GET"])
 @login_required
 def get_transactions(sandbox_id, user_id):
-    """Get all transactions."""
+    """Get all transactions. Supports shared access."""
     try:
+        owner_id, permission = _check_sandbox_access(sandbox_id, user_id, "watch")
+        if not owner_id:
+            return jsonify({"error": "Sandbox not found"}), 404
+
         rows = query(
             "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s AND user_id = %s ORDER BY executed_at DESC",
-            (sandbox_id, user_id),
+            (sandbox_id, owner_id),
             fetchall=True
         )
         return jsonify({"transactions": rows})
@@ -362,23 +404,26 @@ def get_transactions(sandbox_id, user_id):
 @sandbox_bp.route("/api/sandbox/<int:sandbox_id>/trade", methods=["POST"])
 @login_required
 def trade_stock(sandbox_id, user_id):
-    """Execute a buy or sell trade."""
+    """Execute a buy or sell trade. Requires edit permission for shared sandboxes."""
     try:
+        # Check access – need 'edit' permission to trade
+        owner_id, permission = _check_sandbox_access(sandbox_id, user_id, "edit")
+        if not owner_id:
+            return jsonify({"error": "Sandbox not found or insufficient permissions"}), 404
+
         body = request.get_json(force=True)
         symbol = body.get("symbol")
-        trade_type = body.get("type", "").upper() # BUY or SELL
+        trade_type = body.get("type", "").upper()
         quantity = float(body.get("quantity", 0))
-        amount = float(body.get("amount", 0)) # Support for dollar trades
+        amount = float(body.get("amount", 0))
         
         if not symbol or trade_type not in ["BUY", "SELL"]:
             return jsonify({"error": "Invalid trade parameters"}), 400
             
-        # 1. Get current price
         price = _get_current_price(symbol)
         if not price:
             return jsonify({"error": "Could not fetch current price"}), 500
             
-        # Determine quantity from amount if needed
         if amount > 0 and quantity <= 0:
             quantity = amount / price
             
@@ -387,18 +432,17 @@ def trade_stock(sandbox_id, user_id):
             
         total_cost = price * quantity
         
-        # 2. Get Sandbox state
-        sandbox = query("SELECT * FROM sandboxes WHERE id = %s AND user_id = %s", (sandbox_id, user_id), fetchone=True)
+        # Use owner_id for all data operations
+        sandbox = query("SELECT * FROM sandboxes WHERE id = %s AND user_id = %s", (sandbox_id, owner_id), fetchone=True)
         if not sandbox:
             return jsonify({"error": "Sandbox not found"}), 404
             
         current_balance = float(sandbox["balance"])
         
-        # 3. Validation & Execution Logic
         if trade_type == "BUY":
-            return _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balance, user_id)
+            return _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balance, owner_id)
         elif trade_type == "SELL":
-            return _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balance, user_id)
+            return _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balance, owner_id)
             
     except Exception as e:
         return jsonify({"error": str(e)}), 500
