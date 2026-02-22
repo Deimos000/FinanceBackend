@@ -7,6 +7,7 @@ from database import query
 import yfinance as yf
 import pandas as pd
 import datetime
+from blueprints.auth import login_required
 
 sandbox_bp = Blueprint("sandbox", __name__)
 
@@ -177,10 +178,11 @@ def _get_current_prices(symbols):
         return {}
 
 @sandbox_bp.route("/api/sandboxes", methods=["GET"])
-def get_sandboxes():
+@login_required
+def get_sandboxes(user_id):
     """Return all sandboxes with total equity (cash + holdings)."""
     try:
-        sandboxes = query("SELECT * FROM sandboxes ORDER BY created_at DESC", fetchall=True)
+        sandboxes = query("SELECT * FROM sandboxes WHERE user_id = %s ORDER BY created_at DESC", (user_id,), fetchall=True)
         results = []
         
         if sandboxes:
@@ -235,7 +237,8 @@ def get_sandboxes():
         return jsonify({"error": str(e)}), 500
 
 @sandbox_bp.route("/api/sandbox", methods=["POST"])
-def create_sandbox():
+@login_required
+def create_sandbox(user_id):
     """Create a new sandbox."""
     try:
         body = request.get_json(force=True)
@@ -246,8 +249,8 @@ def create_sandbox():
         initial_balance = float(body.get("balance", 10000.00))
         
         res = query(
-            "INSERT INTO sandboxes (name, balance, initial_balance) VALUES (%s, %s, %s) RETURNING id",
-            (name, initial_balance, initial_balance),
+            "INSERT INTO sandboxes (name, user_id, balance, initial_balance) VALUES (%s, %s, %s, %s) RETURNING id",
+            (name, user_id, initial_balance, initial_balance),
             fetchone=True 
         )
         new_id = res["id"]
@@ -256,30 +259,35 @@ def create_sandbox():
         return jsonify({"error": str(e)}), 500
 
 @sandbox_bp.route("/api/sandbox/<int:sandbox_id>", methods=["DELETE"])
-def delete_sandbox(sandbox_id):
+@login_required
+def delete_sandbox(sandbox_id, user_id):
     """Delete a sandbox."""
     try:
+        # Check permissions
+        s = query("SELECT id FROM sandboxes WHERE id = %s AND user_id = %s", (sandbox_id, user_id), fetchone=True)
+        if not s: return jsonify({"error": "Sandbox not found"}), 404
         # Cascade delete (manual since DB might not have cascade setup)
-        query("DELETE FROM sandbox_transactions WHERE sandbox_id = %s", (sandbox_id,))
-        query("DELETE FROM sandbox_portfolio WHERE sandbox_id = %s", (sandbox_id,))
-        query("DELETE FROM sandboxes WHERE id = %s", (sandbox_id,))
+        query("DELETE FROM sandbox_transactions WHERE sandbox_id = %s AND user_id = %s", (sandbox_id, user_id))
+        query("DELETE FROM sandbox_portfolio WHERE sandbox_id = %s AND user_id = %s", (sandbox_id, user_id))
+        query("DELETE FROM sandboxes WHERE id = %s AND user_id = %s", (sandbox_id, user_id))
         return jsonify({"ok": True, "id": sandbox_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @sandbox_bp.route("/api/sandbox/<int:sandbox_id>/portfolio", methods=["GET"])
-def get_portfolio(sandbox_id):
+@login_required
+def get_portfolio(sandbox_id, user_id):
     """Get portfolio for a sandbox with current values and equity history."""
     try:
         # 1. Get Holdings
         portfolio_items = query(
-            "SELECT * FROM sandbox_portfolio WHERE sandbox_id = %s",
-            (sandbox_id,),
+            "SELECT * FROM sandbox_portfolio WHERE sandbox_id = %s AND user_id = %s",
+            (sandbox_id, user_id),
             fetchall=True
         )
         
         # 2. Get Cash Balance
-        sandbox = query("SELECT balance, initial_balance, created_at FROM sandboxes WHERE id = %s", (sandbox_id,), fetchone=True)
+        sandbox = query("SELECT balance, initial_balance, created_at FROM sandboxes WHERE id = %s AND user_id = %s", (sandbox_id, user_id), fetchone=True)
         if not sandbox:
             return jsonify({"error": "Sandbox not found"}), 404
             
@@ -320,8 +328,8 @@ def get_portfolio(sandbox_id):
         # 4. Generate Equity History
         # Fetch all transactions to reconstruct history
         transactions = query(
-            "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s ORDER BY executed_at ASC",
-            (sandbox_id,),
+            "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s AND user_id = %s ORDER BY executed_at ASC",
+            (sandbox_id, user_id),
             fetchall=True
         )
         
@@ -338,12 +346,13 @@ def get_portfolio(sandbox_id):
         return jsonify({"error": str(e)}), 500
 
 @sandbox_bp.route("/api/sandbox/<int:sandbox_id>/transactions", methods=["GET"])
-def get_transactions(sandbox_id):
+@login_required
+def get_transactions(sandbox_id, user_id):
     """Get all transactions."""
     try:
         rows = query(
-            "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s ORDER BY executed_at DESC",
-            (sandbox_id,),
+            "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s AND user_id = %s ORDER BY executed_at DESC",
+            (sandbox_id, user_id),
             fetchall=True
         )
         return jsonify({"transactions": rows})
@@ -351,7 +360,8 @@ def get_transactions(sandbox_id):
         return jsonify({"error": str(e)}), 500
 
 @sandbox_bp.route("/api/sandbox/<int:sandbox_id>/trade", methods=["POST"])
-def trade_stock(sandbox_id):
+@login_required
+def trade_stock(sandbox_id, user_id):
     """Execute a buy or sell trade."""
     try:
         body = request.get_json(force=True)
@@ -378,7 +388,7 @@ def trade_stock(sandbox_id):
         total_cost = price * quantity
         
         # 2. Get Sandbox state
-        sandbox = query("SELECT * FROM sandboxes WHERE id = %s", (sandbox_id,), fetchone=True)
+        sandbox = query("SELECT * FROM sandboxes WHERE id = %s AND user_id = %s", (sandbox_id, user_id), fetchone=True)
         if not sandbox:
             return jsonify({"error": "Sandbox not found"}), 404
             
@@ -386,24 +396,24 @@ def trade_stock(sandbox_id):
         
         # 3. Validation & Execution Logic
         if trade_type == "BUY":
-            return _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balance)
+            return _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balance, user_id)
         elif trade_type == "SELL":
-            return _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balance)
+            return _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balance, user_id)
             
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-def _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balance):
+def _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balance, user_id):
     if current_balance < total_cost:
         return jsonify({"error": f"Insufficient funds (${current_balance:.2f} < ${total_cost:.2f})"}), 400
     
     new_balance = current_balance - total_cost
-    query("UPDATE sandboxes SET balance = %s WHERE id = %s", (new_balance, sandbox_id))
+    query("UPDATE sandboxes SET balance = %s WHERE id = %s AND user_id = %s", (new_balance, sandbox_id, user_id))
     
     # Update Portfolio
     existing = query(
-        "SELECT quantity, average_buy_price FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s",
-        (sandbox_id, symbol),
+        "SELECT quantity, average_buy_price FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s AND user_id = %s",
+        (sandbox_id, symbol, user_id),
         fetchone=True
     )
     
@@ -414,16 +424,16 @@ def _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balanc
         new_avg = ((old_qty * old_avg) + (quantity * price)) / new_qty
         
         query(
-            "UPDATE sandbox_portfolio SET quantity = %s, average_buy_price = %s WHERE sandbox_id = %s AND symbol = %s",
-            (new_qty, new_avg, sandbox_id, symbol)
+            "UPDATE sandbox_portfolio SET quantity = %s, average_buy_price = %s WHERE sandbox_id = %s AND symbol = %s AND user_id = %s",
+            (new_qty, new_avg, sandbox_id, symbol, user_id)
         )
     else:
         query(
-            "INSERT INTO sandbox_portfolio (sandbox_id, symbol, quantity, average_buy_price) VALUES (%s, %s, %s, %s)",
-            (sandbox_id, symbol, quantity, price)
+            "INSERT INTO sandbox_portfolio (sandbox_id, user_id, symbol, quantity, average_buy_price) VALUES (%s, %s, %s, %s, %s)",
+            (sandbox_id, user_id, symbol, quantity, price)
         )
         
-    _record_transaction(sandbox_id, symbol, "BUY", quantity, price)
+    _record_transaction(sandbox_id, symbol, "BUY", quantity, price, user_id)
     
     return jsonify({
         "ok": True, 
@@ -435,10 +445,10 @@ def _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balanc
         "new_balance": new_balance
     })
 
-def _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balance):
+def _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balance, user_id):
     existing = query(
-        "SELECT quantity FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s",
-        (sandbox_id, symbol),
+        "SELECT quantity FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s AND user_id = %s",
+        (sandbox_id, symbol, user_id),
         fetchone=True
     )
     owned_qty = float(existing["quantity"]) if existing else 0
@@ -447,18 +457,18 @@ def _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balan
         return jsonify({"error": f"Insufficient shares ({owned_qty} < {quantity})"}), 400
         
     new_balance = current_balance + total_cost
-    query("UPDATE sandboxes SET balance = %s WHERE id = %s", (new_balance, sandbox_id))
+    query("UPDATE sandboxes SET balance = %s WHERE id = %s AND user_id = %s", (new_balance, sandbox_id, user_id))
     
     new_qty = owned_qty - quantity
     if new_qty <= 0.000001:
-        query("DELETE FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s", (sandbox_id, symbol))
+        query("DELETE FROM sandbox_portfolio WHERE sandbox_id = %s AND symbol = %s AND user_id = %s", (sandbox_id, symbol, user_id))
     else:
         query(
-            "UPDATE sandbox_portfolio SET quantity = %s WHERE sandbox_id = %s AND symbol = %s",
-            (new_qty, sandbox_id, symbol)
+            "UPDATE sandbox_portfolio SET quantity = %s WHERE sandbox_id = %s AND symbol = %s AND user_id = %s",
+            (new_qty, sandbox_id, symbol, user_id)
         )
         
-    _record_transaction(sandbox_id, symbol, "SELL", quantity, price)
+    _record_transaction(sandbox_id, symbol, "SELL", quantity, price, user_id)
     
     return jsonify({
         "ok": True, 
@@ -470,8 +480,8 @@ def _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balan
         "new_balance": new_balance
     })
 
-def _record_transaction(sandbox_id, symbol, trade_type, quantity, price):
+def _record_transaction(sandbox_id, symbol, trade_type, quantity, price, user_id):
     query(
-        "INSERT INTO sandbox_transactions (sandbox_id, symbol, type, quantity, price) VALUES (%s, %s, %s, %s, %s)",
-        (sandbox_id, symbol, trade_type, quantity, price)
+        "INSERT INTO sandbox_transactions (sandbox_id, user_id, symbol, type, quantity, price) VALUES (%s, %s, %s, %s, %s, %s)",
+        (sandbox_id, user_id, symbol, trade_type, quantity, price)
     )

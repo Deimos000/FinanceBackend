@@ -3,23 +3,24 @@ from database import query
 from services.gemini import categorize_transactions
 import json
 from datetime import datetime, timedelta
+from blueprints.auth import login_required
 
 statistics_bp = Blueprint('statistics', __name__)
 
 @statistics_bp.route('/api/stats/category-spending', methods=['GET'])
-def category_spending():
+@login_required
+def category_spending(user_id):
     """
     Returns total spending grouped by category for a specific date range.
     """
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
     
-    # We only care about expenses (negative amounts)
-    # Group by category
     sql = """
         SELECT category, SUM(ABS(amount)) as total
         FROM transactions
         WHERE amount < 0
+          AND user_id = %s
           AND booking_date >= %s
           AND booking_date <= %s
           AND category IS NOT NULL
@@ -28,10 +29,9 @@ def category_spending():
         ORDER BY total DESC
     """
     
-    rows = query(sql, (start_date, end_date), fetchall=True)
+    rows = query(sql, (user_id, start_date, end_date), fetchall=True)
     
-    # Get category colors/icons to enrich response
-    categories_ref = query("SELECT name, color, icon FROM categories", fetchall=True)
+    categories_ref = query("SELECT name, color, icon FROM categories WHERE user_id = %s OR user_id IS NULL", (user_id,), fetchall=True)
     cat_map = {c['name']: c for c in categories_ref}
     
     results = []
@@ -48,18 +48,19 @@ def category_spending():
     return jsonify(results)
 
 @statistics_bp.route('/api/stats/category-trends', methods=['GET'])
-def category_trends():
+@login_required
+def category_trends(user_id):
     """
     Returns daily spending, grouped by category.
     """
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
 
-    # Get daily spending per category
     sql = """
         SELECT category, booking_date, SUM(ABS(amount)) as total
         FROM transactions
         WHERE amount < 0
+          AND user_id = %s
           AND booking_date >= %s
           AND booking_date <= %s
           AND category IS NOT NULL
@@ -68,7 +69,7 @@ def category_trends():
         ORDER BY booking_date ASC
     """
     
-    rows = query(sql, (start_date, end_date), fetchall=True)
+    rows = query(sql, (user_id, start_date, end_date), fetchall=True)
     
     results = {}
     
@@ -86,10 +87,10 @@ def category_trends():
 
 
 @statistics_bp.route('/api/stats/monthly-cashflow', methods=['GET'])
-def monthly_cashflow():
+@login_required
+def monthly_cashflow(user_id):
     """
     Returns monthly income and spending for the last N months.
-    Each item: { month: "YYYY-MM", income: float, spending: float }
     """
     months = request.args.get('months', 6, type=int)
     cutoff = (datetime.utcnow() - timedelta(days=months * 31)).strftime('%Y-%m-%d')
@@ -100,10 +101,10 @@ def monthly_cashflow():
             SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS income,
             SUM(CASE WHEN amount < 0 THEN ABS(amount) ELSE 0 END) AS spending
         FROM transactions
-        WHERE booking_date >= %s
+        WHERE user_id = %s AND booking_date >= %s
         GROUP BY TO_CHAR(booking_date, 'YYYY-MM')
         ORDER BY month ASC
-    """, (cutoff,), fetchall=True)
+    """, (user_id, cutoff,), fetchall=True)
 
     results = []
     for r in rows:
@@ -119,22 +120,24 @@ def monthly_cashflow():
 # ── Budget Settings ────────────────────────────────────────
 
 @statistics_bp.route('/api/budget/settings', methods=['GET'])
-def get_budget_settings():
+@login_required
+def get_budget_settings(user_id):
     """Returns the global budget settings (monthly income target)."""
-    row = query("SELECT monthly_income FROM budget_settings ORDER BY id LIMIT 1", fetchone=True)
+    row = query("SELECT monthly_income FROM budget_settings WHERE user_id = %s ORDER BY id LIMIT 1", (user_id,), fetchone=True)
     if not row:
         return jsonify({'monthly_income': 0})
     return jsonify({'monthly_income': float(row['monthly_income'])})
 
 
 @statistics_bp.route('/api/budget/settings', methods=['PUT'])
-def update_budget_settings():
+@login_required
+def update_budget_settings(user_id):
     """Updates the monthly income target."""
     data = request.get_json()
     monthly_income = data.get('monthly_income', 0)
 
     # Upsert: update existing row or insert if empty
-    existing = query("SELECT id FROM budget_settings ORDER BY id LIMIT 1", fetchone=True)
+    existing = query("SELECT id FROM budget_settings WHERE user_id = %s ORDER BY id LIMIT 1", (user_id,), fetchone=True)
     if existing:
         query(
             "UPDATE budget_settings SET monthly_income = %s, updated_at = NOW() WHERE id = %s",
@@ -142,8 +145,8 @@ def update_budget_settings():
         )
     else:
         query(
-            "INSERT INTO budget_settings (monthly_income) VALUES (%s)",
-            (monthly_income,)
+            "INSERT INTO budget_settings (user_id, monthly_income) VALUES (%s, %s)",
+            (user_id, monthly_income,)
         )
 
     return jsonify({'status': 'updated', 'monthly_income': monthly_income})
@@ -152,10 +155,12 @@ def update_budget_settings():
 # ── Category Budgets ───────────────────────────────────────
 
 @statistics_bp.route('/api/budget/categories', methods=['GET'])
-def get_category_budgets():
+@login_required
+def get_category_budgets(user_id):
     """Returns all categories with their monthly_budget limits."""
     rows = query(
-        "SELECT name, color, icon, COALESCE(monthly_budget, 0) as monthly_budget FROM categories ORDER BY name",
+        "SELECT name, color, icon, COALESCE(monthly_budget, 0) as monthly_budget FROM categories WHERE user_id = %s OR user_id IS NULL ORDER BY name",
+        (user_id,),
         fetchall=True
     )
     results = []
@@ -170,14 +175,15 @@ def get_category_budgets():
 
 
 @statistics_bp.route('/api/budget/categories/<string:category_name>', methods=['PUT'])
-def update_category_budget(category_name):
+@login_required
+def update_category_budget(category_name, user_id):
     """Updates the monthly_budget for a specific category."""
     data = request.get_json()
     monthly_budget = data.get('monthly_budget', 0)
 
     query(
-        "UPDATE categories SET monthly_budget = %s WHERE name = %s",
-        (monthly_budget, category_name)
+        "UPDATE categories SET monthly_budget = %s WHERE name = %s AND (user_id = %s OR user_id IS NULL)",
+        (monthly_budget, category_name, user_id)
     )
     return jsonify({'status': 'updated', 'name': category_name, 'monthly_budget': monthly_budget})
 
@@ -185,7 +191,8 @@ def update_category_budget(category_name):
 # ── Categorization ─────────────────────────────────────────
 
 @statistics_bp.route('/api/stats/categorize', methods=['POST'])
-def trigger_categorization():
+@login_required
+def trigger_categorization(user_id):
     """
     Finds uncategorized transactions AND transactions categorized as 'Other'
     and uses Gemini to categorize them.
@@ -193,10 +200,10 @@ def trigger_categorization():
     uncategorized = query("""
         SELECT transaction_id, remittance_information, creditor_name, amount
         FROM transactions
-        WHERE (category IS NULL OR category = '' OR category = 'Other')
+        WHERE user_id = %s AND (category IS NULL OR category = '' OR category = 'Other')
         ORDER BY booking_date DESC
         LIMIT 50
-    """, fetchall=True)
+    """, (user_id,), fetchall=True)
     
     if not uncategorized:
         return jsonify({"message": "No transactions to categorize found", "count": 0})
@@ -212,8 +219,8 @@ def trigger_categorization():
         query("""
             UPDATE transactions
             SET category = %s
-            WHERE transaction_id = %s
-        """, (category, tx_id))
+            WHERE transaction_id = %s AND user_id = %s
+        """, (category, tx_id, user_id))
         updated_count += 1
         
     return jsonify({

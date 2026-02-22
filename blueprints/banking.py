@@ -21,6 +21,7 @@ from config import (
 )
 from blueprints.transactions import save_transaction
 from database import query
+from blueprints.auth import login_required
 
 banking_bp = Blueprint("banking", __name__)
 log = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ def _api_headers():
     }
 
 
-def _save_account_to_db(acc):
+def _save_account_to_db(acc, user_id):
     """Persist an account dict into the accounts table (upsert)."""
     account_id = acc.get("uid") or acc.get("account_id") or acc.get("id") or acc.get("iban")
     if not account_id or not isinstance(account_id, str):
@@ -86,9 +87,10 @@ def _save_account_to_db(acc):
 
     query(
         """
-        INSERT INTO accounts (account_id, name, iban, balance, currency, bank_name, type, subtype, last_synced)
-        VALUES (%s, %s, %s, %s, %s, %s, 'depository', 'checking', NOW())
+        INSERT INTO accounts (account_id, user_id, name, iban, balance, currency, bank_name, type, subtype, last_synced)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, 'depository', 'checking', NOW())
         ON CONFLICT (account_id) DO UPDATE SET
+            user_id    = EXCLUDED.user_id,
             name       = EXCLUDED.name,
             iban       = EXCLUDED.iban,
             balance    = CASE
@@ -102,6 +104,7 @@ def _save_account_to_db(acc):
         """,
         (
             account_id,
+            user_id,
             acc.get("name", "Bank Account"),
             iban,
             balance,
@@ -115,7 +118,8 @@ def _save_account_to_db(acc):
 # ── auth-url ──────────────────────────────────────────────
 
 @banking_bp.route("/api/banking/auth-url", methods=["POST"])
-def auth_url():
+@login_required
+def auth_url(user_id):
     body = request.get_json(force=True) or {}
     bank_name = body.get("bankName", "Commerzbank")
 
@@ -169,7 +173,8 @@ def auth_url():
 # ── search-banks ──────────────────────────────────────────────
 
 @banking_bp.route("/api/banking/search-banks", methods=["GET"])
-def search_banks():
+@login_required
+def search_banks(user_id):
     """Search available banks/ASPSPs via Enable Banking directory."""
     query = request.args.get("query", "")
     country = request.args.get("country", "DE")
@@ -247,7 +252,8 @@ def _fetch_all_transactions(uid, headers, date_from):
 # ── session ───────────────────────────────────────────────
 
 @banking_bp.route("/api/banking/session", methods=["POST"])
-def session():
+@login_required
+def session(user_id):
     body = request.get_json(force=True)
     code = body.get("code")
     if not code:
@@ -284,7 +290,7 @@ def session():
             # ── STEP 2: Save account FIRST (before transactions!) ──
             # The transactions table has a FK to accounts(account_id),
             # so the account row MUST exist before inserting transactions.
-            _save_account_to_db(acc)
+            _save_account_to_db(acc, user_id)
 
             # ── STEP 3: Fetch balances & transactions from Enable Banking ──
             log.info("[session] Fetching balances for %s...", uid)
@@ -314,7 +320,7 @@ def session():
                         log.info("[session] Parsed balance for %s: %s", uid, parsed_bal)
 
                 # Re-save account with updated balance
-                _save_account_to_db(acc)
+                _save_account_to_db(acc, user_id)
             else:
                 log.warning("[session] Could not fetch balances for %s: %s %s",
                             uid, bal_resp.status_code, bal_resp.text[:200])
@@ -325,7 +331,7 @@ def session():
                 failed_count = 0
                 for t in transactions:
                     try:
-                        save_transaction(t, uid)
+                        save_transaction(t, uid, user_id)
                         saved_count += 1
                     except Exception as tx_err:
                         failed_count += 1
@@ -354,7 +360,8 @@ def session():
 # ── refresh ───────────────────────────────────────────────
 
 @banking_bp.route("/api/banking/refresh", methods=["POST"])
-def refresh():
+@login_required
+def refresh(user_id):
     body = request.get_json(force=True)
     accounts = body.get("accounts", [])
 
@@ -391,7 +398,7 @@ def refresh():
 
         try:
             # Save/update account row first
-            _save_account_to_db(acc)
+            _save_account_to_db(acc, user_id)
 
             bal_resp = requests.get(f"{API_BASE}/accounts/{uid}/balances", headers=headers)
             log.info("[refresh] Balance status: %s", bal_resp.status_code)
@@ -428,7 +435,7 @@ def refresh():
 
             for t in transactions:
                 try:
-                    is_new = save_transaction(t, target_account_id)
+                    is_new = save_transaction(t, target_account_id, user_id)
                     if is_new:
                         new_tx_count += 1
                     else:
@@ -443,14 +450,11 @@ def refresh():
             stats["new_tx"] += new_tx_count
                     
             if not bal_resp.ok and bal_resp.status_code == 401:
-                 # Check if transaction fetch also failed with 401/403 which would imply session expired
-                 # But we don't have the last tx_resp status here easily unless we refactor _fetch_all_transactions to return it.
-                 # For now, rely on balance response for session validity check
                  acc["sessionExpired"] = True
                  log.warning("[refresh] Session expired for %s (balance check)", uid)
                  print(f"DEBUG: [refresh] Session expired for {uid}")
 
-            _save_account_to_db(acc)
+            _save_account_to_db(acc, user_id)
 
         except Exception as e:
             tb = traceback.format_exc()
@@ -463,4 +467,3 @@ def refresh():
     log.info("[refresh] ✅ Refresh completed for %d account(s)", len(updated))
     print(f"DEBUG: [refresh] Finished. Stats: {stats}")
     return jsonify({"accounts": updated, "stats": stats})
-

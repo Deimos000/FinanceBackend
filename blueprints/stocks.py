@@ -7,6 +7,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from flask import Blueprint, request, jsonify
+from blueprints.auth import login_required
 
 stocks_bp = Blueprint("stocks", __name__)
 
@@ -23,7 +24,8 @@ def _convert_numpy_types(obj):
     return obj
 
 @stocks_bp.route("/api/yahoo-proxy", methods=["GET"])
-def yahoo_proxy():
+@login_required
+def yahoo_proxy(user_id):
     qtype = request.args.get("type", "quote")
     
     if qtype == "market_movers":

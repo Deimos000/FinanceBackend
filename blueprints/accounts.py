@@ -4,15 +4,18 @@ Accounts blueprint – CRUD for bank / cash accounts.
 
 from flask import Blueprint, request, jsonify
 from database import query
+from blueprints.auth import login_required
 
 accounts_bp = Blueprint("accounts", __name__)
 
 
 @accounts_bp.route("/api/accounts", methods=["GET"])
-def get_accounts():
-    """Return every account together with its transactions."""
+@login_required
+def get_accounts(user_id):
+    """Return every account together with its transactions for the current user."""
     accounts = query(
-        "SELECT * FROM accounts ORDER BY created_at",
+        "SELECT * FROM accounts WHERE user_id = %s ORDER BY created_at",
+        (user_id,),
         fetchall=True,
     )
 
@@ -20,10 +23,10 @@ def get_accounts():
         txs = query(
             """
             SELECT * FROM transactions
-            WHERE account_id = %s
+            WHERE account_id = %s AND user_id = %s
             ORDER BY booking_date DESC
             """,
-            (acc["account_id"],),
+            (acc["account_id"], user_id),
             fetchall=True,
         )
 
@@ -56,7 +59,8 @@ def get_accounts():
 
 
 @accounts_bp.route("/api/accounts", methods=["POST"])
-def upsert_account():
+@login_required
+def upsert_account(user_id):
     """Create or update an account."""
     body = request.get_json(force=True)
 
@@ -91,9 +95,10 @@ def upsert_account():
     # Upsert via ON CONFLICT
     query(
         """
-        INSERT INTO accounts (account_id, name, iban, balance, currency, bank_name, type, subtype, last_synced)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        INSERT INTO accounts (account_id, user_id, name, iban, balance, currency, bank_name, type, subtype, last_synced)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         ON CONFLICT (account_id) DO UPDATE SET
+            user_id    = EXCLUDED.user_id,
             name       = EXCLUDED.name,
             iban       = EXCLUDED.iban,
             balance    = CASE
@@ -107,6 +112,7 @@ def upsert_account():
         """,
         (
             account_id,
+            user_id,
             body.get("name", "Bank Account"),
             iban,
             balance,
@@ -121,9 +127,10 @@ def upsert_account():
 
 
 @accounts_bp.route("/api/accounts/<account_id>", methods=["DELETE"])
-def delete_account(account_id):
+@login_required
+def delete_account(account_id, user_id):
     """Delete an account and all its transactions (CASCADE)."""
-    deleted = query("DELETE FROM accounts WHERE account_id = %s", (account_id,))
+    deleted = query("DELETE FROM accounts WHERE account_id = %s AND user_id = %s", (account_id, user_id))
     if deleted == 0:
-        return jsonify({"error": "Account not found"}), 404
+        return jsonify({"error": "Account not found or not owned by user"}), 404
     return jsonify({"ok": True})

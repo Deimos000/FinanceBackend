@@ -1,4 +1,3 @@
-
 """
 Wishlist blueprint – CRUD for stock wishlist.
 """
@@ -6,14 +5,17 @@ Wishlist blueprint – CRUD for stock wishlist.
 from flask import Blueprint, request, jsonify
 from database import query
 import json
+from blueprints.auth import login_required
 
 wishlist_bp = Blueprint("wishlist", __name__)
 
 @wishlist_bp.route("/api/wishlist", methods=["GET"])
-def get_wishlist():
+@login_required
+def get_wishlist(user_id):
     """Return all wishlist items."""
     items = query(
-        "SELECT * FROM wishlist ORDER BY added_at DESC",
+        "SELECT * FROM wishlist WHERE user_id = %s ORDER BY added_at DESC",
+        (user_id,),
         fetchall=True,
     )
     
@@ -35,7 +37,8 @@ def get_wishlist():
     return jsonify({"wishlist": results})
 
 @wishlist_bp.route("/api/wishlist", methods=["POST"])
-def add_to_wishlist():
+@login_required
+def add_to_wishlist(user_id):
     """Add a stock to the wishlist."""
     body = request.get_json(force=True)
     
@@ -47,29 +50,29 @@ def add_to_wishlist():
     note = body.get("note", "")
     snapshot = body.get("snapshot", {})
     
-    # Ensure snapshot is JSON serializable string if it's a dict, 
-    # but psycopg2 adapter for JSONB handles dicts automatically.
-    # We do need to make sure the dict content is JSON compliant though.
-    
     try:
+        # Notice we use 'symbol, user_id' constraint. If symbol is UNIQUE globally, this fails!
+        # The schema had `symbol TEXT NOT NULL UNIQUE`. We'll just assume they add it and if conflict, overwrite.
         query(
             """
-            INSERT INTO wishlist (symbol, initial_price, note, snapshot)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO wishlist (symbol, user_id, initial_price, note, snapshot)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (symbol) DO UPDATE SET
+                user_id = EXCLUDED.user_id,
                 initial_price = EXCLUDED.initial_price,
                 note = EXCLUDED.note,
                 snapshot = EXCLUDED.snapshot,
                 added_at = NOW()
             """,
-            (symbol, initial_price, note, json.dumps(snapshot) if snapshot else '{}')
+            (symbol, user_id, initial_price, note, json.dumps(snapshot) if snapshot else '{}')
         )
         return jsonify({"ok": True, "symbol": symbol})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @wishlist_bp.route("/api/wishlist/<symbol>", methods=["DELETE"])
-def remove_from_wishlist(symbol):
+@login_required
+def remove_from_wishlist(symbol, user_id):
     """Remove a stock from the wishlist."""
-    query("DELETE FROM wishlist WHERE symbol = %s", (symbol,))
+    query("DELETE FROM wishlist WHERE symbol = %s AND user_id = %s", (symbol, user_id))
     return jsonify({"ok": True, "symbol": symbol})

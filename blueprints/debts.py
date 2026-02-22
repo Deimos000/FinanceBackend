@@ -4,6 +4,7 @@ Debts blueprint – persons, debts, sub-debts CRUD.
 
 from flask import Blueprint, request, jsonify
 from database import query
+from blueprints.auth import login_required
 
 debts_bp = Blueprint("debts", __name__)
 
@@ -11,7 +12,8 @@ debts_bp = Blueprint("debts", __name__)
 # ── GET ────────────────────────────────────────────────────
 
 @debts_bp.route("/api/debts", methods=["GET"])
-def get_debts():
+@login_required
+def get_debts(user_id):
     """
     ?type=summary → people with net balance
     ?type=list    → all debts with sub_debts & remaining amounts
@@ -19,20 +21,20 @@ def get_debts():
     qtype = request.args.get("type", "summary")
 
     if qtype == "summary":
-        people = query("SELECT * FROM persons ORDER BY name", fetchall=True)
+        people = query("SELECT * FROM persons WHERE user_id = %s ORDER BY name", (user_id,), fetchall=True)
 
         summaries = []
         for person in people:
             debts = query(
-                "SELECT * FROM debts WHERE person_id = %s",
-                (person["id"],),
+                "SELECT * FROM debts WHERE person_id = %s AND user_id = %s",
+                (person["id"], user_id),
                 fetchall=True,
             )
             net_balance = 0.0
             for d in debts:
                 sub_sum = query(
-                    "SELECT COALESCE(SUM(amount), 0) AS total FROM sub_debts WHERE debt_id = %s",
-                    (d["id"],),
+                    "SELECT COALESCE(SUM(amount), 0) AS total FROM sub_debts WHERE debt_id = %s AND user_id = %s",
+                    (d["id"], user_id),
                     fetchone=True,
                 )
                 paid = float(sub_sum["total"])
@@ -57,26 +59,27 @@ def get_debts():
             SELECT d.*, p.name AS person_name
             FROM debts d
             JOIN persons p ON d.person_id = p.id
+            WHERE d.user_id = %s
         """
-        params = []
+        params = [user_id]
         if filter_type:
-            sql += " WHERE d.type = %s"
+            sql += " AND d.type = %s"
             params.append(filter_type)
         sql += " ORDER BY d.created_at DESC"
 
-        debts = query(sql, params or None, fetchall=True)
+        debts = query(sql, params, fetchall=True)
 
         result = []
         for d in debts:
             sub_sum = query(
-                "SELECT COALESCE(SUM(amount), 0) AS total FROM sub_debts WHERE debt_id = %s",
-                (d["id"],),
+                "SELECT COALESCE(SUM(amount), 0) AS total FROM sub_debts WHERE debt_id = %s AND user_id = %s",
+                (d["id"], user_id),
                 fetchone=True,
             )
             paid = float(sub_sum["total"])
             sub_debts = query(
-                "SELECT * FROM sub_debts WHERE debt_id = %s ORDER BY created_at DESC",
-                (d["id"],),
+                "SELECT * FROM sub_debts WHERE debt_id = %s AND user_id = %s ORDER BY created_at DESC",
+                (d["id"], user_id),
                 fetchall=True,
             )
             for sd in sub_debts:
@@ -100,7 +103,8 @@ def get_debts():
 # ── POST (action-based) ───────────────────────────────────
 
 @debts_bp.route("/api/debts", methods=["POST"])
-def create():
+@login_required
+def create(user_id):
     body = request.get_json(force=True)
     action = body.get("action")
 
@@ -109,21 +113,27 @@ def create():
         if not name:
             return jsonify({"error": "Name required"}), 400
         row = query(
-            "INSERT INTO persons (name) VALUES (%s) RETURNING id, name",
-            (name,),
+            "INSERT INTO persons (name, user_id) VALUES (%s, %s) RETURNING id, name",
+            (name, user_id),
             returning=True,
         )
         return jsonify(row)
 
     if action == "create_debt":
+        # Validate person belongs to user
+        person = query("SELECT id FROM persons WHERE id = %s AND user_id = %s", (body["person_id"], user_id), fetchone=True)
+        if not person:
+            return jsonify({"error": "Person not found"}), 404
+
         row = query(
             """
-            INSERT INTO debts (person_id, type, amount, description)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO debts (person_id, user_id, type, amount, description)
+            VALUES (%s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
                 body["person_id"],
+                user_id,
                 body["type"],
                 body["amount"],
                 body.get("description", ""),
@@ -137,25 +147,29 @@ def create():
         amount = body["amount"]
         note = body.get("note", "")
 
+        # Validate debt belongs to user
+        debt = query("SELECT * FROM debts WHERE id = %s AND user_id = %s", (debt_id, user_id), fetchone=True)
+        if not debt:
+            return jsonify({"error": "Debt not found"}), 404
+
         row = query(
-            "INSERT INTO sub_debts (debt_id, amount, note) VALUES (%s, %s, %s) RETURNING id",
-            (debt_id, amount, note),
+            "INSERT INTO sub_debts (debt_id, user_id, amount, note) VALUES (%s, %s, %s, %s) RETURNING id",
+            (debt_id, user_id, amount, note),
             returning=True,
         )
 
         # Check if debt is fully paid → auto-delete
-        debt = query("SELECT * FROM debts WHERE id = %s", (debt_id,), fetchone=True)
         sub_total = query(
-            "SELECT COALESCE(SUM(amount), 0) AS total FROM sub_debts WHERE debt_id = %s",
-            (debt_id,),
+            "SELECT COALESCE(SUM(amount), 0) AS total FROM sub_debts WHERE debt_id = %s AND user_id = %s",
+            (debt_id, user_id),
             fetchone=True,
         )
         remaining = float(debt["amount"]) - float(sub_total["total"])
 
         deleted = False
         if remaining <= 0:
-            query("DELETE FROM sub_debts WHERE debt_id = %s", (debt_id,))
-            query("DELETE FROM debts WHERE id = %s", (debt_id,))
+            query("DELETE FROM sub_debts WHERE debt_id = %s AND user_id = %s", (debt_id, user_id))
+            query("DELETE FROM debts WHERE id = %s AND user_id = %s", (debt_id, user_id))
             deleted = True
 
         return jsonify({"id": row["id"], "deleted": deleted})
@@ -166,9 +180,10 @@ def create():
 # ── DELETE ─────────────────────────────────────────────────
 
 @debts_bp.route("/api/debts/<int:debt_id>", methods=["DELETE"])
-def delete_debt(debt_id):
-    query("DELETE FROM sub_debts WHERE debt_id = %s", (debt_id,))
-    deleted = query("DELETE FROM debts WHERE id = %s", (debt_id,))
+@login_required
+def delete_debt(debt_id, user_id):
+    query("DELETE FROM sub_debts WHERE debt_id = %s AND user_id = %s", (debt_id, user_id))
+    deleted = query("DELETE FROM debts WHERE id = %s AND user_id = %s", (debt_id, user_id))
     if deleted == 0:
         return jsonify({"error": "Debt not found"}), 404
     return jsonify({"ok": True})

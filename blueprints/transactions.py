@@ -6,6 +6,7 @@ import hashlib, base64, json, re
 from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify
 from database import query
+from blueprints.auth import login_required
 
 transactions_bp = Blueprint("transactions", __name__)
 
@@ -32,10 +33,7 @@ def _robust_stable_id(t, account_id):
         return str(tid)
 
     # 2. Construct unique string from fields
-    # We include: account_id, date, amount, currency, recipient, sender, remittance
-    
     amount = t.get("amount")
-    # Handle amount dict or value
     if isinstance(amount, dict):
         amt_val = amount.get("amount", 0)
         curr = amount.get("currency", "EUR")
@@ -57,12 +55,9 @@ def _robust_stable_id(t, account_id):
     # Return SHA256 hash
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-
-
-def save_transaction(t, account_id):
+def save_transaction(t, account_id, user_id):
     """
     Upsert one raw transaction dict into the database.
-    Returns True if a NEW transaction was inserted, False if updated/existing.
     """
     amount = 0.0
     ta = t.get("transaction_amount") or {}
@@ -77,7 +72,6 @@ def save_transaction(t, account_id):
     elif indicator in ("CRDT", "C"):
         amount = abs(amount)
 
-    # Calculate IDs
     new_id = _robust_stable_id(t, account_id)
     old_id = _legacy_stable_id(t, account_id)
 
@@ -88,7 +82,6 @@ def save_transaction(t, account_id):
     if isinstance(remittance, list):
         remittance = " ".join(remittance)
 
-    # Try extracting names from remittance
     if not creditor and not debtor and remittance:
         m = re.match(r"^(.*?) Sent from", remittance, re.I)
         if m:
@@ -97,8 +90,6 @@ def save_transaction(t, account_id):
     booking = t.get("value_date") or t.get("booking_date") or t.get("bookingDate")
     currency = ta.get("currency") or t.get("currency") or "EUR"
 
-    # 1. Check if we need to migrate an old ID
-    # If old_id exists in DB but new_id does not, we update the ID.
     rows_old = query("SELECT 1 FROM transactions WHERE transaction_id = %s", (old_id,), fetchall=True)
     existing_old = rows_old[0] if rows_old else None
 
@@ -106,25 +97,20 @@ def save_transaction(t, account_id):
     existing_new = rows_new[0] if rows_new else None
 
     if existing_old and not existing_new:
-        # MIGRATE
-        print(f"DEBUG: [save_transaction] Migrating old_id={old_id} to new_id={new_id}")
         query("UPDATE transactions SET transaction_id = %s WHERE transaction_id = %s", (new_id, old_id))
-        # After migration, it counts as "existing" since we just updated the ID
         existing_new = True 
 
     if existing_new:
-        print(f"DEBUG: [save_transaction] Skipping existing transaction {new_id} ({amount} {currency} on {booking})")
         return False
 
-    # 2. Upsert
-    print(f"DEBUG: [save_transaction] Inserting NEW transaction {new_id} ({amount} {currency} on {booking})")
     query(
         """
         INSERT INTO transactions
-            (transaction_id, account_id, booking_date, amount, currency,
+            (transaction_id, account_id, user_id, booking_date, amount, currency,
              creditor_name, debtor_name, remittance_information, raw_json)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (transaction_id) DO UPDATE SET
+            user_id                = EXCLUDED.user_id,
             amount                 = EXCLUDED.amount,
             currency               = EXCLUDED.currency,
             creditor_name          = EXCLUDED.creditor_name,
@@ -135,6 +121,7 @@ def save_transaction(t, account_id):
         (
             new_id,
             account_id,
+            user_id,
             booking,
             amount,
             currency,
@@ -147,20 +134,18 @@ def save_transaction(t, account_id):
     
     return True
 
-
-
 # ── routes ─────────────────────────────────────────────────
 
 @transactions_bp.route("/api/transactions", methods=["GET"])
-def get_transactions():
-    """List transactions with optional filters: account_id, days."""
+@login_required
+def get_transactions(user_id):
     account_id = request.args.get("account_id")
     days = request.args.get("days", type=int)
     start_date = request.args.get("start_date")
     end_date = request.args.get("end_date")
 
-    clauses = []
-    params = []
+    clauses = ["user_id = %s"]
+    params = [user_id]
 
     if account_id:
         clauses.append("account_id = %s")
@@ -177,7 +162,6 @@ def get_transactions():
         clauses.append("booking_date >= %s")
         params.append(cutoff)
 
-    # Filter for uncategorized
     if request.args.get("uncategorized") == "true":
         clauses.append("(category IS NULL OR category = '')")
 
@@ -197,24 +181,22 @@ def get_transactions():
 
 
 @transactions_bp.route("/api/transactions/daily-spending", methods=["GET"])
-def daily_spending():
-    """Sum of absolute spending per day (negative amounts) for the last N days OR specific range."""
+@login_required
+def daily_spending(user_id):
     start_date = request.args.get("start_date")
     end_date = request.args.get("end_date")
     days = request.args.get("days", type=int)
 
     if not start_date:
-        # Fallback to days if no start_date
         d = days if days else 30
         start_date = (datetime.utcnow() - timedelta(days=d)).strftime("%Y-%m-%d")
     
-    # Construct query
     sql = """
         SELECT booking_date::text AS date, SUM(ABS(amount)) AS amount
         FROM transactions
-        WHERE amount < 0 AND booking_date >= %s
+        WHERE amount < 0 AND user_id = %s AND booking_date >= %s
     """
-    params = [start_date]
+    params = [user_id, start_date]
 
     if end_date:
         sql += " AND booking_date <= %s"
@@ -231,8 +213,8 @@ def daily_spending():
 
 
 @transactions_bp.route("/api/transactions/monthly-income", methods=["GET"])
-def monthly_income():
-    """Sum of income per month (positive amounts) for the last N months."""
+@login_required
+def monthly_income(user_id):
     months = request.args.get("months", 6, type=int)
     cutoff = (datetime.utcnow() - timedelta(days=months * 30)).strftime("%Y-%m-%d")
 
@@ -240,11 +222,11 @@ def monthly_income():
         """
         SELECT TO_CHAR(booking_date, 'YYYY-MM') AS month, SUM(amount) AS amount
         FROM transactions
-        WHERE amount > 0 AND booking_date >= %s
+        WHERE amount > 0 AND user_id = %s AND booking_date >= %s
         GROUP BY TO_CHAR(booking_date, 'YYYY-MM')
         ORDER BY month
         """,
-        (cutoff,),
+        (user_id, cutoff,),
         fetchall=True,
     )
 
@@ -254,15 +236,15 @@ def monthly_income():
     return jsonify(rows)
 
 @transactions_bp.route("/api/transactions/<transaction_id>", methods=["PATCH"])
-def update_transaction(transaction_id):
-    """Update a transaction's category (or other fields in future)."""
+@login_required
+def update_transaction(transaction_id, user_id):
     data = request.get_json()
     category = data.get("category")
 
     if category is not None:
         query(
-            "UPDATE transactions SET category = %s WHERE transaction_id = %s",
-            (category, transaction_id)
+            "UPDATE transactions SET category = %s WHERE transaction_id = %s AND user_id = %s",
+            (category, transaction_id, user_id)
         )
         return jsonify({"status": "updated", "category": category})
 
