@@ -176,7 +176,7 @@ def remove_share(sandbox_id, share_id, user_id):
 @sharing_bp.route("/api/sandboxes/shared", methods=["GET"])
 @login_required
 def get_shared_sandboxes(user_id):
-    """Get all sandboxes shared with the current user."""
+    """Get all sandboxes shared with the current user, with correct total_equity."""
     try:
         rows = query(
             """
@@ -193,14 +193,57 @@ def get_shared_sandboxes(user_id):
             fetchall=True,
         )
 
+        if not rows:
+            return jsonify({"sandboxes": []})
+
+        # Collect all sandbox IDs to fetch their portfolios
+        sandbox_ids = [r["id"] for r in rows]
+
+        # Fetch all portfolio items for these sandboxes
+        all_portfolio = query(
+            "SELECT sandbox_id, symbol, quantity, average_buy_price FROM sandbox_portfolio WHERE sandbox_id = ANY(%s)",
+            (sandbox_ids,),
+            fetchall=True,
+        )
+
+        # Build portfolio map and collect symbols
+        portfolio_map = {}
+        all_symbols = set()
+        if all_portfolio:
+            for item in all_portfolio:
+                sid = item["sandbox_id"]
+                if sid not in portfolio_map:
+                    portfolio_map[sid] = []
+                portfolio_map[sid].append(item)
+                all_symbols.add(item["symbol"])
+
+        # Fetch current prices for all symbols at once
+        from blueprints.sandbox import _get_current_prices
+        prices = _get_current_prices(list(all_symbols))
+
         results = []
-        for r in (rows or []):
+        for r in rows:
+            sid = r["id"]
+            balance = float(r["balance"])
+            initial = float(r["initial_balance"]) if r["initial_balance"] else 10000.0
+
+            # Calculate holdings value
+            holdings_value = 0.0
+            if sid in portfolio_map:
+                for item in portfolio_map[sid]:
+                    sym = item["symbol"]
+                    qty = float(item["quantity"])
+                    price = prices.get(sym, float(item["average_buy_price"]))
+                    holdings_value += price * qty
+
+            total_equity = balance + holdings_value
+
             results.append({
-                "id": r["id"],
+                "id": sid,
                 "name": r["name"],
-                "balance": float(r["balance"]),
-                "initial_balance": float(r["initial_balance"]) if r["initial_balance"] else 10000.0,
-                "total_equity": float(r["balance"]),  # Will be enriched client-side or via portfolio call
+                "balance": balance,
+                "initial_balance": initial,
+                "total_equity": total_equity,
                 "created_at": str(r["created_at"]),
                 "permission": r["permission"],
                 "share_id": r["share_id"],
@@ -212,3 +255,4 @@ def get_shared_sandboxes(user_id):
         return jsonify({"sandboxes": results})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
