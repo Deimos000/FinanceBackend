@@ -11,6 +11,7 @@ from blueprints.auth import login_required
 
 sandbox_bp = Blueprint("sandbox", __name__)
 
+_CACHE = {}
 
 def _check_sandbox_access(sandbox_id, user_id, required_permission="watch"):
     """
@@ -73,7 +74,20 @@ def _get_historical_prices(symbols, start_date):
 def _calculate_portfolio_history(sandbox_id, initial_balance, transactions, created_at):
     """
     Reconstruct daily portfolio value from transactions.
+    Cached for exactly 15 minutes, based on the last transaction timestamp if any, or creation date.
     """
+    if not transactions:
+        cache_key = f"hist_{sandbox_id}_{created_at.timestamp()}"
+    else:
+        last_tx = transactions[-1]['executed_at']
+        cache_key = f"hist_{sandbox_id}_{last_tx.timestamp()}"
+    
+    now = datetime.datetime.now().timestamp()
+    if cache_key in _CACHE:
+        val, expiry = _CACHE[cache_key]
+        if now < expiry:
+            return val
+
     try:
         # 1. Timeline Setup
         # Start from creation date or first transaction, whichever is earlier
@@ -150,13 +164,8 @@ def _calculate_portfolio_history(sandbox_id, initial_balance, transactions, crea
                                 if pd.isna(p): p = 0.0
                                 equity_holdings += qty * p
                 else:
-                     # Fallback: if no price data for this specific day (e.g. weekend/holidays if not filled),
-                     # use the last known value? yfinance reindex usually handles this if we implement it right.
-                     # But if we are iterating strict calendar days and yfinance only gave trading days...
-                     # We should reindex price_df to all_dates beforehand to be safe.
                      pass 
             except Exception as e:
-                # print(f"Error calculating equity for {date_obj}: {e}")
                 pass
 
             total_equity = current_cash + equity_holdings
@@ -167,7 +176,8 @@ def _calculate_portfolio_history(sandbox_id, initial_balance, transactions, crea
                 "value": total_equity
             })
             
-        # Re-fill missing values in our history list if any (shouldn't be with this loop)
+        # Cache for 15 minutes
+        _CACHE[cache_key] = (history, now + 900)
         return history
 
     except Exception as e:
@@ -181,35 +191,68 @@ def _calculate_portfolio_history(sandbox_id, initial_balance, transactions, crea
         ]
 
 def _get_current_price(symbol):
-    """Helper to get real-time price from yfinance."""
+    """Helper to get real-time price from yfinance (cached for 5 min)."""
+    cache_key = f"price_{symbol}"
+    now = datetime.datetime.now().timestamp()
+    if cache_key in _CACHE:
+        val, expiry = _CACHE[cache_key]
+        if now < expiry:
+            return val
+
     try:
         ticker = yf.Ticker(symbol)
         # Try fast_info first (faster)
         price = ticker.fast_info.last_price
-        if price: return price
-        # Fallback to info
-        info = ticker.info
-        return info.get("currentPrice") or info.get("regularMarketPrice")
+        if not price:
+            info = ticker.info
+            price = info.get("currentPrice") or info.get("regularMarketPrice")
+        
+        if price:
+            _CACHE[cache_key] = (price, now + 300)
+        return price
     except Exception as e:
         print(f"Error fetching price for {symbol}: {e}")
         return None
 
 def _get_current_prices(symbols):
-    """Helper to get current prices for multiple stocks efficiently."""
+    """Helper to get current prices for multiple stocks efficiently (cached for 5 min)."""
     if not symbols: return {}
+    now = datetime.datetime.now().timestamp()
+    
+    # Check cache first
+    result = {}
+    missing_symbols = []
+    
+    for sym in symbols:
+        cache_key = f"price_{sym}"
+        if cache_key in _CACHE:
+            val, expiry = _CACHE[cache_key]
+            if now < expiry:
+                result[sym] = val
+                continue
+        missing_symbols.append(sym)
+        
+    if not missing_symbols:
+        return result
+
     try:
-        tickers = yf.Tickers(" ".join(symbols))
-        prices = {}
-        for sym in symbols:
+        tickers = yf.Tickers(" ".join(missing_symbols))
+        for sym in missing_symbols:
              try:
                  t = tickers.tickers[sym]
                  p = t.fast_info.last_price
-                 if p: prices[sym] = p
+                 if p: 
+                     result[sym] = p
+                     _CACHE[f"price_{sym}"] = (p, now + 300)
              except:
-                 prices[sym] = 0.0
-        return prices
+                 result[sym] = 0.0
+                 _CACHE[f"price_{sym}"] = (0.0, now + 300)
+        return result
     except:
-        return {}
+        # On total failure, fill missing with 0.0
+        for sym in missing_symbols:
+            result[sym] = 0.0
+        return result
 
 @sandbox_bp.route("/api/sandboxes", methods=["GET"])
 @login_required
