@@ -95,17 +95,42 @@ def register():
 @auth_bp.route("/auth/settings", methods=["GET"])
 @login_required
 def get_settings(user_id):
-    user = query("SELECT gemini_api_key FROM users WHERE id = %s", (user_id,), fetchone=True)
+    user = query(
+        "SELECT gemini_api_key, theme, color_scheme_id, background_style FROM users WHERE id = %s",
+        (user_id,), fetchone=True
+    )
     if not user:
         return jsonify({"error": "User not found"}), 404
-    return jsonify({"gemini_api_key": user.get("gemini_api_key") or ""}), 200
+    return jsonify({
+        "gemini_api_key": user.get("gemini_api_key") or "",
+        "theme": user.get("theme") or "dark",
+        "color_scheme_id": user.get("color_scheme_id") or "persian-indigo",
+        "background_style": user.get("background_style") or "pitch",
+    }), 200
 
 @auth_bp.route("/auth/settings", methods=["PUT", "OPTIONS"])
 @login_required
 def update_settings(user_id):
     data = request.json or {}
-    gemini_api_key = data.get("gemini_api_key")
-    if gemini_api_key is not None:
-        query("UPDATE users SET gemini_api_key = %s WHERE id = %s", (gemini_api_key, user_id))
+    updates = []
+    params = []
+
+    if "gemini_api_key" in data:
+        updates.append("gemini_api_key = %s")
+        params.append(data["gemini_api_key"])
+    if "theme" in data:
+        updates.append("theme = %s")
+        params.append(data["theme"])
+    if "color_scheme_id" in data:
+        updates.append("color_scheme_id = %s")
+        params.append(data["color_scheme_id"])
+    if "background_style" in data:
+        updates.append("background_style = %s")
+        params.append(data["background_style"])
+
+    if updates:
+        params.append(user_id)
+        query(f"UPDATE users SET {', '.join(updates)} WHERE id = %s", tuple(params))
+
     return jsonify({"message": "Settings updated"}), 200
 

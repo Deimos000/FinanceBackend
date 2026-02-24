@@ -71,124 +71,163 @@ def _get_historical_prices(symbols, start_date):
         print(f"Error fetching historical prices: {e}")
         return pd.DataFrame()
 
-def _calculate_portfolio_history(sandbox_id, initial_balance, transactions, created_at):
+def _record_equity_snapshot(sandbox_id, user_id, total_equity, cash_balance, holdings_value, snapshot_date=None):
     """
-    Reconstruct daily portfolio value from transactions.
-    Cached for exactly 15 minutes, based on the last transaction timestamp if any, or creation date.
+    Record (or update) today's equity snapshot for a sandbox.
+    Uses ON CONFLICT to upsert – only one row per sandbox per day.
     """
-    if not transactions:
-        cache_key = f"hist_{sandbox_id}_{created_at.timestamp()}"
-    else:
-        last_tx = transactions[-1]['executed_at']
-        cache_key = f"hist_{sandbox_id}_{last_tx.timestamp()}"
-    
-    now = datetime.datetime.now().timestamp()
-    if cache_key in _CACHE:
-        val, expiry = _CACHE[cache_key]
-        if now < expiry:
-            return val
+    if snapshot_date is None:
+        snapshot_date = datetime.date.today()
+    try:
+        query(
+            """INSERT INTO sandbox_equity_history
+                   (sandbox_id, user_id, total_equity, cash_balance, holdings_value, snapshot_date)
+               VALUES (%s, %s, %s, %s, %s, %s)
+               ON CONFLICT (sandbox_id, snapshot_date)
+               DO UPDATE SET total_equity = EXCLUDED.total_equity,
+                            cash_balance = EXCLUDED.cash_balance,
+                            holdings_value = EXCLUDED.holdings_value,
+                            created_at = NOW()""",
+            (sandbox_id, user_id, total_equity, cash_balance, holdings_value, snapshot_date)
+        )
+    except Exception as e:
+        print(f"Snapshot record error for sandbox {sandbox_id}: {e}")
 
+
+def _seed_equity_history(sandbox_id, user_id, initial_balance, transactions, created_at):
+    """
+    Seed historical equity snapshots from yfinance data.
+    Called once when the history table is empty for a sandbox.
+    Returns (history_list, error_message_or_None).
+    """
     try:
         # 1. Timeline Setup
-        # Start from creation date or first transaction, whichever is earlier
         start_date = created_at.date()
         if transactions:
             first_tx_date = transactions[0]['executed_at'].date()
             if first_tx_date < start_date:
                 start_date = first_tx_date
-                
-        # Generate date range until today
+
         end_date = datetime.date.today()
-        # Create a date range (pandas DateTimeIndex)
         all_dates = pd.date_range(start_date, end_date)
-        
+
         # 2. Identify all symbols involved
-        symbols = set(t['symbol'] for t in transactions)
-        
-        # 3. Fetch Historical Prices
-        price_df = _get_historical_prices(list(symbols), start_date)
-        
-        # Reindex to ensure we have values for every single day in the range
-        # This handles weekends/holidays by carrying forward the last close price
+        symbols = list(set(t['symbol'] for t in transactions))
+
+        # 3. Fetch Historical Prices per stock
+        price_df = _get_historical_prices(symbols, start_date) if symbols else pd.DataFrame()
+
         if not price_df.empty:
             price_df = price_df.reindex(all_dates).ffill().bfill()
-        
-        # Format timestamps for efficient lookup
-        # price_df index is DatetimeIndex. We'll map dates to prices.
-        
+
         # 4. Reconstruct State Day-by-Day
         history = []
-        
         current_cash = float(initial_balance)
         current_holdings = {sym: 0.0 for sym in symbols}
-        
-        # Organize transactions by date for quick access
+
         tx_by_date = {}
         for t in transactions:
             d = t['executed_at'].date()
-            if d not in tx_by_date: tx_by_date[d] = []
+            if d not in tx_by_date:
+                tx_by_date[d] = []
             tx_by_date[d].append(t)
-            
+
         for single_date in all_dates:
             date_obj = single_date.date()
-            
-            # Apply transactions for this day
+
             if date_obj in tx_by_date:
                 for t in tx_by_date[date_obj]:
                     qty = float(t['quantity'])
                     price = float(t['price'])
-                    total = qty * price
+                    total_cost = qty * price
                     sym = t['symbol']
-                    
                     if t['type'] == 'BUY':
-                        current_cash -= total
+                        current_cash -= total_cost
                         current_holdings[sym] += qty
                     elif t['type'] == 'SELL':
-                        current_cash += total
+                        current_cash += total_cost
                         current_holdings[sym] -= qty
-            
-            # Calculate Equity
+
             equity_holdings = 0.0
-            
-            # Check if we have price data for this date
-            # We use 'single_date' (Timestamp) to lookup in DataFrame
-            try:
-                if not price_df.empty and single_date in price_df.index:
-                    prices_today = price_df.loc[single_date]
-                    for sym, qty in current_holdings.items():
-                        if qty > 0:
-                            # Handle potential missing columns or NaN
-                            if sym in prices_today:
-                                p = float(prices_today[sym])
-                                # Fallback if nan
-                                if pd.isna(p): p = 0.0
-                                equity_holdings += qty * p
-                else:
-                     pass 
-            except Exception as e:
-                pass
+            if not price_df.empty and single_date in price_df.index:
+                prices_today = price_df.loc[single_date]
+                for sym, qty in current_holdings.items():
+                    if qty > 0 and sym in prices_today:
+                        p = float(prices_today[sym])
+                        if not pd.isna(p):
+                            equity_holdings += qty * p
 
             total_equity = current_cash + equity_holdings
-            
-            # Add to history
+            snap_date = date_obj
+
             history.append({
                 "timestamp": single_date.timestamp() * 1000,
-                "value": total_equity
+                "value": round(total_equity, 2)
             })
-            
-        # Cache for 15 minutes
-        _CACHE[cache_key] = (history, now + 900)
-        return history
+
+            # Persist each day's snapshot
+            _record_equity_snapshot(
+                sandbox_id, user_id,
+                round(total_equity, 2),
+                round(current_cash, 2),
+                round(equity_holdings, 2),
+                snapshot_date=snap_date
+            )
+
+        return history, None
 
     except Exception as e:
-        print(f"History calc error: {e}")
-        # Fallback to simple line
+        import traceback
+        traceback.print_exc()
+        error_msg = f"Failed to seed equity history: {str(e)}"
+        print(error_msg)
+        # Return minimal fallback + the error
         now_ts = datetime.datetime.now().timestamp() * 1000
         start_ts = created_at.timestamp() * 1000
         return [
-            {"timestamp": start_ts, "value": initial_balance},
-            {"timestamp": now_ts, "value": initial_balance} # Should ideally be current equity
-        ]
+            {"timestamp": start_ts, "value": float(initial_balance)},
+            {"timestamp": now_ts, "value": float(initial_balance)}
+        ], error_msg
+
+
+def _get_equity_history(sandbox_id, user_id, initial_balance, transactions, created_at):
+    """
+    Return equity history from the DB snapshot table.
+    If no snapshots exist, seed them from yfinance historical data first.
+    Returns (history_list, error_message_or_None).
+    """
+    # Check cache first
+    cache_key = f"eq_hist_{sandbox_id}"
+    now = datetime.datetime.now().timestamp()
+    if cache_key in _CACHE:
+        val, expiry = _CACHE[cache_key]
+        if now < expiry:
+            return val, None
+
+    # Check if we have snapshots in the DB
+    rows = query(
+        "SELECT total_equity, snapshot_date FROM sandbox_equity_history WHERE sandbox_id = %s ORDER BY snapshot_date ASC",
+        (sandbox_id,), fetchall=True
+    )
+
+    if not rows or len(rows) < 2:
+        # No history yet — seed from yfinance historical data
+        history, error = _seed_equity_history(sandbox_id, user_id, initial_balance, transactions, created_at)
+        if history:
+            _CACHE[cache_key] = (history, now + 900)
+        return history, error
+
+    # Build history from DB rows
+    history = []
+    for row in rows:
+        ts = datetime.datetime.combine(row["snapshot_date"], datetime.time()).timestamp() * 1000
+        history.append({
+            "timestamp": ts,
+            "value": float(row["total_equity"])
+        })
+
+    _CACHE[cache_key] = (history, now + 900)
+    return history, None
 
 def _get_current_price(symbol):
     """Helper to get real-time price from yfinance (cached for 5 min)."""
@@ -407,22 +446,31 @@ def get_portfolio(sandbox_id, user_id):
 
         total_equity = cash_balance + holdings_value
 
+        # Record today's equity snapshot (at most once per day via upsert)
+        _record_equity_snapshot(sandbox_id, owner_id, total_equity, cash_balance, holdings_value)
+
         transactions = query(
             "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s AND user_id = %s ORDER BY executed_at ASC",
             (sandbox_id, owner_id),
             fetchall=True
         )
         
-        equity_history = _calculate_portfolio_history(sandbox_id, initial_balance, transactions, sandbox["created_at"])
+        equity_history, history_error = _get_equity_history(
+            sandbox_id, owner_id, initial_balance, transactions, sandbox["created_at"]
+        )
         
-        return jsonify({
+        response = {
             "portfolio": results,
             "cash_balance": cash_balance,
             "initial_balance": initial_balance,
             "total_equity": total_equity,
             "equity_history": equity_history,
             "permission": permission,
-        })
+        }
+        if history_error:
+            response["history_error"] = history_error
+        
+        return jsonify(response)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -436,10 +484,16 @@ def get_transactions(sandbox_id, user_id):
             return jsonify({"error": "Sandbox not found"}), 404
 
         rows = query(
-            "SELECT * FROM sandbox_transactions WHERE sandbox_id = %s AND user_id = %s ORDER BY executed_at DESC",
+            "SELECT *, executed_at AS created_at FROM sandbox_transactions WHERE sandbox_id = %s AND user_id = %s ORDER BY executed_at DESC",
             (sandbox_id, owner_id),
             fetchall=True
         )
+        # Convert datetime objects to ISO strings for JavaScript compatibility
+        for row in rows:
+            if row.get("executed_at"):
+                row["executed_at"] = row["executed_at"].isoformat()
+            if row.get("created_at"):
+                row["created_at"] = row["created_at"].isoformat()
         return jsonify({"transactions": rows})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -521,6 +575,9 @@ def _execute_buy(sandbox_id, symbol, quantity, price, total_cost, current_balanc
         )
         
     _record_transaction(sandbox_id, symbol, "BUY", quantity, price, user_id)
+
+    # Snapshot equity after trade — recalc total holdings
+    _snapshot_after_trade(sandbox_id, user_id, new_balance)
     
     return jsonify({
         "ok": True, 
@@ -556,6 +613,9 @@ def _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balan
         )
         
     _record_transaction(sandbox_id, symbol, "SELL", quantity, price, user_id)
+
+    # Snapshot equity after trade
+    _snapshot_after_trade(sandbox_id, user_id, new_balance)
     
     return jsonify({
         "ok": True, 
@@ -567,8 +627,60 @@ def _execute_sell(sandbox_id, symbol, quantity, price, total_cost, current_balan
         "new_balance": new_balance
     })
 
+
+def _snapshot_after_trade(sandbox_id, user_id, cash_balance):
+    """Recalculate total holdings value and record a snapshot after a trade."""
+    try:
+        items = query(
+            "SELECT symbol, quantity FROM sandbox_portfolio WHERE sandbox_id = %s AND user_id = %s",
+            (sandbox_id, user_id), fetchall=True
+        )
+        symbols = [i["symbol"] for i in items] if items else []
+        prices = _get_current_prices(symbols)
+        holdings = sum(float(i["quantity"]) * prices.get(i["symbol"], 0) for i in items) if items else 0.0
+        total = cash_balance + holdings
+        _record_equity_snapshot(sandbox_id, user_id, round(total, 2), round(cash_balance, 2), round(holdings, 2))
+        # Invalidate cache so next portfolio load picks up fresh history
+        cache_key = f"eq_hist_{sandbox_id}"
+        if cache_key in _CACHE:
+            del _CACHE[cache_key]
+    except Exception as e:
+        print(f"Post-trade snapshot error: {e}")
+
 def _record_transaction(sandbox_id, symbol, trade_type, quantity, price, user_id):
     query(
         "INSERT INTO sandbox_transactions (sandbox_id, user_id, symbol, type, quantity, price) VALUES (%s, %s, %s, %s, %s, %s)",
         (sandbox_id, user_id, symbol, trade_type, quantity, price)
     )
+
+
+@sandbox_bp.route("/api/sandboxes/snapshot-all", methods=["POST"])
+@login_required
+def snapshot_all_sandboxes(user_id):
+    """Snapshot equity for all of the user's sandboxes. Called on login."""
+    try:
+        sandboxes = query(
+            "SELECT id, balance, initial_balance FROM sandboxes WHERE user_id = %s",
+            (user_id,), fetchall=True
+        )
+        if not sandboxes:
+            return jsonify({"ok": True, "count": 0})
+
+        count = 0
+        for s in sandboxes:
+            sid = s["id"]
+            cash = float(s["balance"])
+            items = query(
+                "SELECT symbol, quantity FROM sandbox_portfolio WHERE sandbox_id = %s AND user_id = %s",
+                (sid, user_id), fetchall=True
+            )
+            symbols = [i["symbol"] for i in items] if items else []
+            prices = _get_current_prices(symbols)
+            holdings = sum(float(i["quantity"]) * prices.get(i["symbol"], 0) for i in items) if items else 0.0
+            total = cash + holdings
+            _record_equity_snapshot(sid, user_id, round(total, 2), round(cash, 2), round(holdings, 2))
+            count += 1
+
+        return jsonify({"ok": True, "count": count})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500

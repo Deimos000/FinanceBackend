@@ -86,6 +86,22 @@ def migrate():
                 else:
                     print(f"  Column user_id already exists on {table}")
 
+            # Create sandbox_equity_history table for daily equity snapshots
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS sandbox_equity_history (
+                id SERIAL PRIMARY KEY,
+                sandbox_id INTEGER NOT NULL REFERENCES sandboxes(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                total_equity DECIMAL(12, 2) NOT NULL,
+                cash_balance DECIMAL(12, 2) NOT NULL,
+                holdings_value DECIMAL(12, 2) NOT NULL,
+                snapshot_date DATE NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                UNIQUE(sandbox_id, snapshot_date)
+            );
+            """)
+            print("Ensured sandbox_equity_history table exists.")
+
         conn.commit()
         print("Migration completed successfully!")
     except Exception as e:
