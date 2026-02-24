@@ -263,7 +263,7 @@ def get_sandboxes(user_id):
         results = []
         
         if sandboxes:
-            all_portfolio_items = query("SELECT * FROM sandbox_portfolio", fetchall=True)
+            all_portfolio_items = query("SELECT * FROM sandbox_portfolio WHERE user_id = %s", (user_id,), fetchall=True)
             
             portfolio_map = {}
             all_symbols = set()

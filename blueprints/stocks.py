@@ -6,10 +6,87 @@ import requests as http_requests
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import json
 from flask import Blueprint, request, jsonify
 from blueprints.auth import login_required
+from database import query
 
 stocks_bp = Blueprint("stocks", __name__)
+
+def _fetch_db_cache(symbol_key):
+    """Fetch from stocks_cache if updated < 1 hour ago"""
+    row = query(
+        "SELECT data FROM stocks_cache WHERE symbol = %s AND updated_at > NOW() - INTERVAL '1 hour'",
+        (symbol_key,),
+        fetchone=True
+    )
+    if row and row.get("data"):
+        return row["data"]
+    return None
+
+def _save_db_cache(symbol_key, data_dict):
+    """Save to stocks_cache table"""
+    try:
+        query(
+            """
+            INSERT INTO stocks_cache (symbol, data, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (symbol) DO UPDATE 
+            SET data = EXCLUDED.data, updated_at = NOW()
+            """,
+            (symbol_key, json.dumps(data_dict))
+        )
+    except Exception as e:
+        print(f"[STOCKS] Failed to cache data for {symbol_key}: {e}")
+
+def _refresh_market_movers():
+    tickers = [
+        "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA",
+        "AMD", "AVGO", "ORCL", "CRM", "ADBE", "NFLX", "INTC",
+        "QCOM", "TXN", "IBM", "CSCO", "UBER", "ABNB", "PYPL",
+        "SQ", "COIN", "SHOP", "SPOT", "SNOW", "PLTR", "U", "RBLX",
+        "DKNG", "NET", "CRWD", "DDOG", "ZS", "TEAM", "MDB"
+    ]
+    
+    try:
+        data = yf.Tickers(" ".join(tickers))
+        results = []
+        
+        for symbol in tickers:
+            try:
+                info = data.tickers[symbol].info
+                fast_info = data.tickers[symbol].fast_info
+                
+                price = info.get("currentPrice") or fast_info.last_price
+                prev_close = info.get("previousClose") or fast_info.previous_close
+                
+                if price and prev_close:
+                    change = price - prev_close
+                    change_percent = (change / prev_close) * 100
+                    mcap = info.get("marketCap")
+                    
+                    results.append({
+                        "symbol": symbol,
+                        "name": info.get("shortName") or symbol,
+                        "price": price,
+                        "change": change,
+                        "changePercent": change_percent,
+                        "marketCap": mcap
+                    })
+            except Exception as e:
+                continue
+                
+        results.sort(key=lambda x: x["changePercent"], reverse=True)
+        top_10 = results[:10]
+        
+        # Save to DB Instead of Memory
+        _save_db_cache("__MARKET_MOVERS__", {"quotes": top_10})
+        
+        return {"quotes": top_10}
+        
+    except Exception as e:
+        print(f"[STOCKS] Failed to refresh market movers: {e}")
+        return None
 
 def _convert_numpy_types(obj):
     """Recursively convert numpy types to native Python types for JSON serialization."""
@@ -29,57 +106,15 @@ def yahoo_proxy(user_id):
     qtype = request.args.get("type", "quote")
     
     if qtype == "market_movers":
-        # Curated list of high-cap stocks to simulate a screener
-        tickers = [
-            "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA",
-            "AMD", "AVGO", "ORCL", "CRM", "ADBE", "NFLX", "INTC",
-            "QCOM", "TXN", "IBM", "CSCO", "UBER", "ABNB", "PYPL",
-            "SQ", "COIN", "SHOP", "SPOT", "SNOW", "PLTR", "U", "RBLX",
-            "DKNG", "NET", "CRWD", "DDOG", "ZS", "TEAM", "MDB"
-        ]
-        
-        try:
-            # Efficiently fetch multiple tickers at once
-            data = yf.Tickers(" ".join(tickers))
-            results = []
+        cached_data = _fetch_db_cache("__MARKET_MOVERS__")
+        if cached_data is not None:
+            return jsonify(cached_data)
             
-            for symbol in tickers:
-                try:
-                    info = data.tickers[symbol].info
-                    # Fallback to fast_info if info is missing or slow
-                    fast_info = data.tickers[symbol].fast_info
-                    
-                    price = info.get("currentPrice") or fast_info.last_price
-                    prev_close = info.get("previousClose") or fast_info.previous_close
-                    
-                    if price and prev_close:
-                        change = price - prev_close
-                        change_percent = (change / prev_close) * 100
-                        
-                        # Only include if Market Cap > 300M (using 30B here as realistic "High Cap" filter for this list, but list is already curated)
-                        mcap = info.get("marketCap")
-                        
-                        results.append({
-                            "symbol": symbol,
-                            "name": info.get("shortName") or symbol,
-                            "price": price,
-                            "change": change,
-                            "changePercent": change_percent,
-                            "marketCap": mcap
-                        })
-                except Exception as e:
-                    # Skip failures for individual tickers
-                    continue
-            
-            # Sort by absolute change percent desc (Movers) OR just Top Gainers
-            # User asked for "Highest Change" imply Gainers usually, or volatility. 
-            # Let's sort by Change Percent Descending (Top Gainers)
-            results.sort(key=lambda x: x["changePercent"], reverse=True)
-            
-            return jsonify({"quotes": results[:10]})
-            
-        except Exception as e:
-            return jsonify({"error": "Failed to fetch market movers", "details": str(e)}), 500
+        fresh_data = _refresh_market_movers()
+        if fresh_data is not None:
+            return jsonify(fresh_data)
+        else:
+            return jsonify({"error": "Failed to fetch market movers"}), 500
 
     # --- SEARCH implementation (unchanged logic but cleaner) ---
     if qtype == "search":
@@ -113,9 +148,16 @@ def yahoo_proxy(user_id):
     rng = request.args.get("range", "1y")
     start_date = request.args.get("start")
     end_date = request.args.get("end")
+    
+    # Check cache for exact parameters
+    cache_key = f"{symbol}_{interval}_{rng}_{start_date}_{end_date}"
+    cached_data = _fetch_db_cache(cache_key)
+    if cached_data is not None:
+        print(f"[STOCKS] Serving CACHED data for {symbol}, range={rng}, interval={interval}")
+        return jsonify(cached_data)
 
     try:
-        print(f"[STOCKS] Fetching data for {symbol}, range={rng}, interval={interval}, start={start_date}, end={end_date}")
+        print(f"[STOCKS] Fetching FRESH data for {symbol}, range={rng}, interval={interval}, start={start_date}, end={end_date}")
         ticker = yf.Ticker(symbol)
         
         # Fetch history
@@ -337,6 +379,9 @@ def yahoo_proxy(user_id):
                 "error": None
             }
         }
+        
+        # Save to DB Intelligently
+        _save_db_cache(cache_key, response_data)
         
         return jsonify(response_data)
 

@@ -143,3 +143,10 @@ CREATE TABLE IF NOT EXISTS sandbox_portfolio (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sandbox_portfolio_sandbox_id ON sandbox_portfolio(sandbox_id);
+
+-- 12. Stocks Cache table
+CREATE TABLE IF NOT EXISTS stocks_cache (
+    symbol TEXT PRIMARY KEY,
+    data JSONB NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
