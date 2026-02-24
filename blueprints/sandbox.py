@@ -415,7 +415,7 @@ def get_portfolio(sandbox_id, user_id):
             return jsonify({"error": "Sandbox not found"}), 404
             
         cash_balance = float(sandbox["balance"])
-        initial_balance = float(sandbox["initial_balance"]) if sandbox["initial_balance"] else cash_balance
+        initial_balance = float(sandbox["initial_balance"]) if sandbox["initial_balance"] is not None else 10000.0
         
         results = []
         holdings_value = 0.0
