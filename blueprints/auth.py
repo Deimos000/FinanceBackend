@@ -2,6 +2,7 @@ import logging
 from functools import wraps
 from flask import Blueprint, request, jsonify
 import jwt
+import datetime
 from config import SECRET_KEY
 from database import query
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -54,7 +55,11 @@ def login():
     if not check_password_hash(user["password_hash"], password):
         return jsonify({"error": "Invalid credentials"}), 401
         
-    token = jwt.encode({"user_id": user["id"]}, SECRET_KEY, algorithm="HS256")
+    token_payload = {
+        "user_id": user["id"],
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    }
+    token = jwt.encode(token_payload, SECRET_KEY, algorithm="HS256")
     return jsonify({"token": token, "user_id": user["id"], "username": username}), 200
 
 @auth_bp.route("/auth/register", methods=["POST", "OPTIONS"])
@@ -89,7 +94,11 @@ def register():
         (cash_account_id, user_id)
     )
     
-    token = jwt.encode({"user_id": user_id}, SECRET_KEY, algorithm="HS256")
+    token_payload = {
+        "user_id": user_id,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=2)
+    }
+    token = jwt.encode(token_payload, SECRET_KEY, algorithm="HS256")
     return jsonify({"token": token, "user_id": user_id, "username": username}), 201
 
 @auth_bp.route("/auth/settings", methods=["GET"])

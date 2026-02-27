@@ -139,6 +139,41 @@ def yahoo_proxy(user_id):
         except Exception as e:
             return jsonify({"error": "Failed to search stocks", "details": str(e)}), 500
 
+    # --- QUOTES implementation (multiple tickers) ---
+    if qtype == "quotes":
+        symbols_str = request.args.get("symbols")
+        if not symbols_str:
+            return jsonify({"error": "Symbols param required for quotes"}), 400
+        
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbols_str}"
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
+            resp = http_requests.get(url, headers=headers, timeout=10)
+            if not resp.ok:
+                 return jsonify({"error": f"Yahoo Quote Error: {resp.reason}", "details": resp.text}), resp.status_code
+            
+            data = resp.json()
+            results = []
+            if "quoteResponse" in data and "result" in data["quoteResponse"]:
+                for q in data["quoteResponse"]["result"]:
+                    price = q.get("regularMarketPrice", 0)
+                    prev_close = q.get("regularMarketPreviousClose", 0)
+                    change = price - prev_close
+                    change_pct = (change / prev_close * 100) if prev_close else 0
+                    results.append({
+                        "symbol": q.get("symbol"),
+                        "price": price,
+                        "previousClose": prev_close,
+                        "change": change,
+                        "changePercent": change_pct
+                    })
+            return jsonify({"quotes": results})
+        except Exception as e:
+            return jsonify({"error": "Failed to fetch quotes", "details": str(e)}), 500
+
+
     # --- QUOTE/CHART implementation (via yfinance) ---
     symbol = request.args.get("symbol")
     if not symbol:
